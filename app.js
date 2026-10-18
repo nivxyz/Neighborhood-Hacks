@@ -18,6 +18,7 @@ const STATUSES = ["reported", "progress", "resolved"];
 const DAY = 24 * 60 * 60 * 1000;
 const OVERDUE_DAYS = 3;       // complaints open this long turn red
 const QUIET_ADMIN_DAYS = 2;   // no admin update for this long → "Needs attention"
+const PIN_PATTERN = /^[0-9]{6,12}$/; // admin PINs: 6 to 12 digits
 
 // ---------- Who is logged in (remembered on this device) ----------
 
@@ -369,7 +370,7 @@ function showRegister() {
       </div>
       <div class="field">
         <label for="r-pin">${t("adminPinNew")}</label>
-        <input id="r-pin" required type="password" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8">
+        <input id="r-pin" required type="password" inputmode="numeric" pattern="[0-9]{6,12}" maxlength="12">
         <p class="hint">${t("adminPinHint")}</p>
       </div>
       <div class="field">
@@ -603,7 +604,7 @@ async function showJoin(code, after) {
       </div>
       <div class="field" id="pin-field" hidden>
         <label for="pin">${t("adminPin")}</label>
-        <input id="pin" type="password" inputmode="numeric" maxlength="8">
+        <input id="pin" type="password" inputmode="numeric" maxlength="12">
         ${b.open ? "" : `<p class="hint"><a href="#/recover/${esc(b.code)}">${t("forgotPin")}</a></p>`}
       </div>
       <p class="form-error" id="join-error" hidden></p>
@@ -720,13 +721,12 @@ async function showRecover(code) {
         <input id="rec-email2" required type="email" autocomplete="email">
       </div>
       <div class="field">
-        <label for="rec-password">${t("recoveryPassword")}</label>
-        <input id="rec-password" required type="password" autocomplete="current-password">
+        <label for="rec-pin">${t("newPinFromEmail")}</label>
+        <input id="rec-pin" required type="password" inputmode="numeric" autocomplete="new-password" maxlength="12">
       </div>
       <p class="form-error" id="signin-error" hidden></p>
-      <button class="btn btn-primary">${t("signIn")}</button>
+      <button class="btn btn-primary">${t("saveNewPin")}</button>
     </form>
-    <div id="pin-result"></div>
   `);
 
   document.getElementById("send-form").onsubmit = async (e) => {
@@ -744,48 +744,26 @@ async function showRecover(code) {
   document.getElementById("signin-form").onsubmit = async (e) => {
     e.preventDefault();
     const errorBox = document.getElementById("signin-error");
-    errorBox.hidden = true;
-    try {
-      const pin = await store.recoverySignIn(
-        code,
-        document.getElementById("rec-email2").value.trim().toLowerCase(),
-        document.getElementById("rec-password").value
-      );
-      showPinResult(code, pin);
-    } catch (err) {
-      console.error(err);
-      errorBox.textContent = t(has(err.message) ? err.message : "saveFailed");
+    const showError = (key) => {
+      errorBox.textContent = t(key);
       errorBox.hidden = false;
-    }
-  };
-}
-
-// After signing in with the recovery email: see the PIN, or set a new one
-function showPinResult(code, pin) {
-  document.getElementById("signin-form").hidden = true;
-  const box = document.getElementById("pin-result");
-  box.innerHTML = `
-    <form class="card admin-card appear" id="newpin-form">
-      <p>${t("yourPinIs")} <strong class="pin-show">${esc(pin)}</strong></p>
-      <div class="field" style="margin-top:14px">
-        <label for="new-pin">${t("newPin")}</label>
-        <input id="new-pin" type="password" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" required>
-      </div>
-      <div class="actions" style="margin-top:0">
-        <button class="btn btn-primary">${t("changePin")}</button>
-        <a class="btn" href="#/b/${esc(code)}">${t("backToLogin")}</a>
-      </div>
-    </form>
-  `;
-  document.getElementById("newpin-form").onsubmit = async (e) => {
-    e.preventDefault();
+    };
+    errorBox.hidden = true;
+    const email = document.getElementById("rec-email2").value.trim().toLowerCase();
+    const pin = document.getElementById("rec-pin").value;
+    // What they typed on the email's page must be a proper PIN
+    if (!PIN_PATTERN.test(pin)) return showError("pinMustBeDigits");
     try {
-      await store.changePin(code, document.getElementById("new-pin").value);
+      await store.recoverPin(code, email, pin);
+      // PIN saved: log them straight in as admin
+      const session = await store.adminLogin(b, pin);
+      user = { code: b.code, buildingName: b.name, name: b.adminName || t("admin"), flat: b.adminFlat || "", isAdmin: true, session };
+      saveUser();
       toast(t("pinChanged"));
-      go("/b/" + code);
+      go("/");
     } catch (err) {
       console.error(err);
-      toast(t("saveFailed"));
+      showError(has(err.message) ? err.message : "saveFailed");
     }
   };
 }

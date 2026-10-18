@@ -667,7 +667,6 @@ input[type="file"]::file-selector-button {
   font-size: 14px;
   font-weight: 500;
 }
-.pin-show { font-size: 24px; letter-spacing: .2em; margin-left: 6px; }
 
 /* ---------- Hiding complaints ---------- */
 .pill-hidden { background: var(--line); color: var(--muted); }

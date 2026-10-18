@@ -15,7 +15,7 @@ import { firebaseConfig } from "./firebase-config.js";
 
 const SDK = "https://www.gstatic.com/firebasejs/10.12.2";
 const LOCAL_KEY = "flatdesk-local";
-export const DEMO_PIN = "1234";
+export const DEMO_PIN = "123456";
 
 export const data = { complaints: [], announcements: [] };
 export const usingFirebase = Boolean(firebaseConfig.projectId);
@@ -216,8 +216,8 @@ export async function resetPassword(code, member, adminSession) {
 
 // ---------- Recovery email (forgot PIN) ----------
 // Firebase Authentication sends the emails. At registration we make an account for the
-// recovery email with a random password nobody knows. "Forgot PIN?" emails a link to set
-// a new password for it; signing in with that lets the admin read and change the PIN.
+// recovery email with a random password nobody knows. "Forgot PIN?" emails a link whose
+// "new password" page is where the admin types their new PIN.
 
 async function auth() {
   if (!fbAuth) {
@@ -244,38 +244,30 @@ export async function sendRecoveryEmail(email) {
   await a.sendPasswordResetEmail(a.instance, email);
 }
 
-// Signs in with the recovery email and returns the current PIN.
+// The new PIN the admin typed on the email's "new password" page becomes the building's PIN.
+// Signing in with the recovery email + that new PIN proves it's them, then we save it.
 // Throws "wrongLogin" or "notThisBuilding".
-export async function recoverySignIn(code, email, password) {
+export async function recoverPin(code, email, newPin) {
+  const pinHash = await hashPin(code, newPin);
   if (!usingFirebase) {
     const secret = localDb.buildings[code]?.private;
     if (!secret || secret.email !== email) throw new Error("notThisBuilding");
-    return secret.pin;
+    Object.assign(secret, { pin: newPin, pinHash });
+    return saveLocal(false);
   }
   const a = await auth();
   try {
-    await a.signInWithEmailAndPassword(a.instance, email, password);
+    await a.signInWithEmailAndPassword(a.instance, email, newPin);
   } catch (err) {
     throw new Error("wrongLogin");
   }
   try {
-    const snap = await fb.getDoc(fb.doc(db, "buildings", code, "private", "admin"));
-    return snap.data().pin;
+    await fb.updateDoc(fb.doc(db, "buildings", code, "private", "admin"), { pin: newPin, pinHash });
   } catch (err) {
-    await a.signOut(a.instance);
     throw new Error("notThisBuilding");
+  } finally {
+    await a.signOut(a.instance);
   }
-}
-
-export async function changePin(code, pin) {
-  const pinHash = await hashPin(code, pin);
-  if (!usingFirebase) {
-    Object.assign(localDb.buildings[code].private, { pin, pinHash });
-    return saveLocal(false);
-  }
-  await fb.updateDoc(fb.doc(db, "buildings", code, "private", "admin"), { pin, pinHash });
-  const a = await auth();
-  await a.signOut(a.instance);
 }
 
 // ---------- Changing data ----------
