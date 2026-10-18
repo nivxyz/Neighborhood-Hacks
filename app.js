@@ -2,11 +2,11 @@
 // This file draws the screens. Other files do the rest:
 //   store.js   saves the data (Firebase, or this browser)
 //   roster.js  reads the admin's residents sheet and checks people against it
-//   photo.js   shrinks complaint photos
+//   photo.js   shrinks photos for complaints and announcements
 //   i18n.js    all on-screen text, in English and Hindi
 
 import * as store from "./store.js";
-import { checkResident, readResidentsFile, sampleSheetUrl, flatKey, nameKey } from "./roster.js";
+import { checkResident, readResidentsFile, parsePastedList, RESIDENT_FILE_TYPES, sampleSheetUrl, flatKey, nameKey } from "./roster.js";
 import { shrinkPhoto, isSafePhoto } from "./photo.js";
 import { t, has, getLang, setLang, LANGUAGES } from "./i18n.js";
 
@@ -252,10 +252,18 @@ function drawTopbar() {
   who.innerHTML = `
     <button class="btn btn-small" id="lang" lang="${LANGUAGES[getLang()].next}">${LANGUAGES[getLang()].switchLabel}</button>
     ${user ? `
-      <span class="who-name">${esc(user.name)} · ${esc(user.flat)}${user.isAdmin ? " · " + t("admin") : ""}</span>
+      <span class="who-name">${esc(user.name)} · ${esc(user.flat)}</span>
+      ${user.isAdmin ? `<span class="role-pill">${t("admin")}</span>` : ""}
       <button class="btn btn-small" id="logout">${t("logOut")}</button>
     ` : ""}
   `;
+
+  // Admins get a purple look and a strip saying they're in admin view, so it's obvious which is which
+  const isAdmin = Boolean(user && user.isAdmin);
+  document.body.classList.toggle("admin-mode", isAdmin);
+  const banner = document.getElementById("mode-banner");
+  banner.hidden = !isAdmin;
+  if (isAdmin) banner.textContent = t("adminView", user.buildingName);
 
   document.getElementById("lang").onclick = () => {
     setLang(LANGUAGES[getLang()].next);
@@ -360,9 +368,10 @@ function showRegister() {
       </div>
       <div class="field">
         <label for="r-file">${t("residentsList")}</label>
-        <input id="r-file" type="file" accept=".xlsx,.xls,.csv">
+        <input id="r-file" type="file" accept="${RESIDENT_FILE_TYPES}">
         <p class="hint">${t("residentsListHint")}
           <a href="${sampleSheetUrl()}" download="flatdesk-residents-sample.csv">${t("sampleSheet")}</a></p>
+        ${pasteBox("r-paste")}
         <div id="sheet-result" aria-live="polite"></div>
       </div>
       <button class="btn btn-primary" id="create-btn">${t("createBuilding")}</button>
@@ -370,11 +379,14 @@ function showRegister() {
   `);
 
   const result = document.getElementById("sheet-result");
+  const fileInput = document.getElementById("r-file");
+  const pasteInput = document.getElementById("r-paste");
 
-  document.getElementById("r-file").onchange = async (e) => {
-    const file = e.target.files[0];
+  fileInput.onchange = async () => {
+    const file = fileInput.files[0];
     residents = null;
     if (!file) return (result.innerHTML = "");
+    pasteInput.value = ""; // use one or the other
     result.innerHTML = `<p class="hint">${esc(t("reading", file.name))}</p>`;
     try {
       const sheet = await readResidentsFile(file);
@@ -382,6 +394,20 @@ function showRegister() {
       result.innerHTML = sheetPreview(sheet);
     } catch (err) {
       result.innerHTML = `<p class="form-error">${esc(sheetError(err))}</p>`;
+    }
+  };
+
+  // The preview updates as they paste or type
+  pasteInput.oninput = () => {
+    residents = null;
+    fileInput.value = "";
+    if (!pasteInput.value.trim()) return (result.innerHTML = "");
+    try {
+      const list = parsePastedList(pasteInput.value);
+      residents = list.residents;
+      result.innerHTML = sheetPreview(list);
+    } catch (err) {
+      result.innerHTML = `<p class="form-error">${esc(t("pasteNoRows"))}</p>`;
     }
   };
 
@@ -420,6 +446,17 @@ function showRegister() {
       button.textContent = t("createBuilding");
     }
   };
+}
+
+// "No sheet? Paste the list instead", opens a text box
+function pasteBox(id) {
+  return `
+    <details class="paste-box">
+      <summary>${t("pasteInstead")}</summary>
+      <p class="hint">${t("pasteHint")}</p>
+      <textarea id="${id}" rows="6" placeholder="A-101 Nivash&#10;B-304 - Priya Sharma&#10;Ravi Kumar, C-12"></textarea>
+    </details>
+  `;
 }
 
 function sheetPreview({ residents, skipped }) {
@@ -605,7 +642,7 @@ function showBoard(live = false) {
     </div>
 
     ${attention.length ? `
-      <div class="section-title attention-title">⚠ ${t("needsAttention")} (${attention.length})</div>
+      <div class="section-title attention-title">${t("needsAttention")} (${attention.length})</div>
       <p class="hint" style="margin:-6px 0 10px">${t("needsAttentionHint")}</p>
       <div class="stack">
         ${attention.map((c, i) => `
@@ -647,6 +684,10 @@ function showBoard(live = false) {
     };
   });
 
+  app.querySelectorAll("[data-photo]").forEach((btn) => {
+    btn.onclick = () => openPhoto(data.announcements.find((a) => a.id === btn.dataset.photo).photo);
+  });
+
   app.querySelectorAll("[data-remove]").forEach((btn) => {
     btn.onclick = () => {
       store.removeAnnouncement(btn.dataset.remove);
@@ -672,6 +713,11 @@ function announcementCard(a, i) {
       </div>
       ${a.when ? `<div class="announce-when">${esc(a.when)}</div>` : ""}
       ${a.body ? `<p style="margin-top:6px">${esc(a.body)}</p>` : ""}
+      ${isSafePhoto(a.photo) ? `
+        <button class="photo-full" data-photo="${a.id}" aria-label="${t("photoAlt")}">
+          <img src="${a.photo}" alt="${t("photoAlt")}" loading="lazy">
+        </button>
+      ` : ""}
       <a class="btn btn-small btn-whatsapp" style="margin-top:12px" href="${whatsappLink(shareAnnouncementText(a))}" target="_blank" rel="noopener">${t("shareWhatsApp")}</a>
     </div>
   `;
@@ -706,7 +752,7 @@ function showResidents(live = false) {
   const b = store.building;
   // When redrawing with new data, keep whatever the admin has typed in the boxes
   const kept = {};
-  if (live) ["add-name", "add-flat", "r-search"].forEach((id) => (kept[id] = document.getElementById(id)?.value || ""));
+  if (live) ["add-name", "add-flat", "add-paste", "r-search"].forEach((id) => (kept[id] = document.getElementById(id)?.value || ""));
 
   const residents = [...(b.residents || [])].sort((x, y) =>
     x.flat.localeCompare(y.flat, undefined, { numeric: true }) || x.name.localeCompare(y.name)
@@ -730,7 +776,9 @@ function showResidents(live = false) {
           <button class="btn btn-primary">${t("add")}</button>
         </div>
         <label for="add-file" class="hint" style="margin-top:14px;font-weight:500">${t("addFromSheet")}</label>
-        <input id="add-file" type="file" accept=".xlsx,.xls,.csv">
+        <input id="add-file" type="file" accept="${RESIDENT_FILE_TYPES}">
+        ${pasteBox("add-paste")}
+        <button type="button" class="btn btn-small" id="add-pasted" style="margin-top:8px">${t("addPasted")}</button>
       </form>
 
       <div class="section-title">${t("peopleOnList", residents.length)}</div>
@@ -768,19 +816,37 @@ function showResidents(live = false) {
     toast(t("added", 1));
   };
 
-  // Add everyone from another sheet (people already on the list are skipped)
+  // Add everyone from another sheet or a pasted list (people already on the list are skipped)
+  const addMany = (people) => {
+    const fresh = people.filter((r) => !isOnList(residents, r.name, r.flat));
+    if (fresh.length) store.addResidents(fresh);
+    toast(fresh.length ? t("added", fresh.length) : t("alreadyOnList"));
+  };
+
   document.getElementById("add-file").onchange = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     try {
-      const sheet = await readResidentsFile(file);
-      const fresh = sheet.residents.filter((r) => !isOnList(residents, r.name, r.flat));
-      if (fresh.length) store.addResidents(fresh);
-      toast(fresh.length ? t("added", fresh.length) : t("alreadyOnList"));
+      addMany((await readResidentsFile(file)).residents);
     } catch (err) {
       toast(sheetError(err));
     }
     e.target.value = "";
+  };
+
+  // Keep the paste box open if it was open before a redraw
+  const pasteArea = document.getElementById("add-paste");
+  if (pasteArea.value) pasteArea.closest("details").open = true;
+
+  document.getElementById("add-pasted").onclick = () => {
+    if (!pasteArea.value.trim()) return pasteArea.closest("details").open = true;
+    try {
+      const people = parsePastedList(pasteArea.value).residents;
+      pasteArea.value = "";
+      addMany(people);
+    } catch (err) {
+      toast(t("pasteNoRows"));
+    }
   };
 
   // Remove someone
@@ -833,14 +899,7 @@ function showNewComplaint() {
         <label for="desc">${t("details")}</label>
         <textarea id="desc" maxlength="500" placeholder="${t("detailsEg")}"></textarea>
       </div>
-      <div class="field">
-        <span class="label">${t("photo")}</span>
-        <label class="btn photo-pick" id="photo-pick">
-          <input type="file" id="photo-input" accept="image/*" class="visually-hidden">
-          ${t("addPhoto")}
-        </label>
-        <div id="photo-preview"></div>
-      </div>
+      ${photoField()}
       <button class="btn btn-primary" id="post-btn">${t("postComplaint")}</button>
     </form>
   `);
@@ -851,37 +910,7 @@ function showNewComplaint() {
   titleInput.oninput = showSimilar;
   categoryInput.onchange = showSimilar;
 
-  const photoInput = document.getElementById("photo-input");
-  const preview = document.getElementById("photo-preview");
-  const pick = document.getElementById("photo-pick");
-  const postBtn = document.getElementById("post-btn");
-
-  photoInput.onchange = async () => {
-    const file = photoInput.files[0];
-    if (!file) return;
-    preview.innerHTML = `<p class="hint">${t("preparingPhoto")}</p>`;
-    postBtn.disabled = true;
-    try {
-      photo = await shrinkPhoto(file);
-      preview.innerHTML = `
-        <div class="photo-preview appear">
-          <img src="${photo}" alt="${t("photoAlt")}">
-          <button type="button" class="btn btn-small" id="photo-remove">${t("removePhoto")}</button>
-        </div>
-      `;
-      pick.hidden = true;
-      document.getElementById("photo-remove").onclick = () => {
-        photo = null;
-        preview.innerHTML = "";
-        photoInput.value = "";
-        pick.hidden = false;
-      };
-    } catch (err) {
-      photo = null;
-      preview.innerHTML = `<p class="form-error">${t("photoFailed")}</p>`;
-    }
-    postBtn.disabled = false;
-  };
+  bindPhotoField(document.getElementById("post-btn"), (p) => (photo = p));
 
   document.getElementById("complaint-form").onsubmit = (e) => {
     e.preventDefault();
@@ -989,6 +1018,57 @@ function shareAnnouncementText(a) {
   ].filter((line, i) => line || i === 3).join("\n");
 }
 
+// --- Optional photo, used on complaints and announcements ---
+
+function photoField() {
+  return `
+    <div class="field">
+      <span class="label">${t("photo")}</span>
+      <label class="btn photo-pick" id="photo-pick">
+        <input type="file" id="photo-input" accept="image/*" class="visually-hidden">
+        ${t("addPhoto")}
+      </label>
+      <div id="photo-preview"></div>
+    </div>
+  `;
+}
+
+// onPhoto gets the shrunk photo, or null when it's removed.
+// The submit button is paused while a photo is being prepared.
+function bindPhotoField(submitBtn, onPhoto) {
+  const input = document.getElementById("photo-input");
+  const preview = document.getElementById("photo-preview");
+  const pick = document.getElementById("photo-pick");
+
+  input.onchange = async () => {
+    const file = input.files[0];
+    if (!file) return;
+    preview.innerHTML = `<p class="hint">${t("preparingPhoto")}</p>`;
+    submitBtn.disabled = true;
+    try {
+      const photo = await shrinkPhoto(file);
+      onPhoto(photo);
+      preview.innerHTML = `
+        <div class="photo-preview appear">
+          <img src="${photo}" alt="${t("photoAlt")}">
+          <button type="button" class="btn btn-small" id="photo-remove">${t("removePhoto")}</button>
+        </div>
+      `;
+      pick.hidden = true;
+      document.getElementById("photo-remove").onclick = () => {
+        onPhoto(null);
+        preview.innerHTML = "";
+        input.value = "";
+        pick.hidden = false;
+      };
+    } catch (err) {
+      onPhoto(null);
+      preview.innerHTML = `<p class="form-error">${t("photoFailed")}</p>`;
+    }
+    submitBtn.disabled = false;
+  };
+}
+
 // --- Full-size photo ---
 
 function openPhoto(src) {
@@ -1094,8 +1174,8 @@ function showComplaint(id, live = false) {
 
 function adminControls(c) {
   return `
-    <div class="section-title">${t("adminPostUpdate")}</div>
-    <form class="card" id="update-form">
+    <div class="section-title admin-title">${t("adminPostUpdate")}</div>
+    <form class="card admin-card" id="update-form">
       <div class="field">
         <label for="new-status">${t("status")}</label>
         <select id="new-status">
@@ -1148,19 +1228,25 @@ function showNewAnnouncement() {
         <label for="a-body">${t("details")}</label>
         <textarea id="a-body" maxlength="400"></textarea>
       </div>
-      <button class="btn btn-primary">${t("postAnnouncement")}</button>
+      ${photoField()}
+      <button class="btn btn-primary" id="post-btn">${t("postAnnouncement")}</button>
     </form>
   `);
 
+  let photo = null;
+  bindPhotoField(document.getElementById("post-btn"), (p) => (photo = p));
+
   document.getElementById("announce-form").onsubmit = (e) => {
     e.preventDefault();
-    store.addAnnouncement({
+    const announcement = {
       id: newId(),
       title: document.getElementById("a-title").value.trim(),
       when: document.getElementById("a-when").value.trim(),
       body: document.getElementById("a-body").value.trim(),
       createdAt: Date.now(),
-    });
+    };
+    if (photo) announcement.photo = photo;
+    store.addAnnouncement(announcement);
     toast(t("announcementPosted"));
     go("/");
   };

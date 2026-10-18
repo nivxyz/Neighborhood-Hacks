@@ -50,11 +50,17 @@ function loadSheetJS() {
   });
 }
 
+// File types the residents list can come from
+export const RESIDENT_FILE_TYPES = ".xlsx,.xls,.csv,.ods,.numbers,.txt";
+
 // Returns { residents: [{ name, flat }], skipped }.
 // Problems throw an Error whose message is a key app.js translates: "sheetEmpty", "needTwoCols", "noRows".
 export async function readResidentsFile(file) {
+  const type = file.name.toLowerCase().split(".").pop();
+  if (type === "txt") return parsePastedList(await file.text()); // a plain list, like a pasted one
+
   await loadSheetJS();
-  const book = file.name.toLowerCase().endsWith(".csv")
+  const book = type === "csv"
     ? XLSX.read(await file.text(), { type: "string" })
     : XLSX.read(await file.arrayBuffer());
   const sheet = book.Sheets[book.SheetNames[0]];
@@ -92,14 +98,42 @@ function parseRows(rows) {
     nameCol = cols.find((c) => c !== flatCol && rows.some((r) => String(r[c]).trim()));
   }
 
+  return collect(rows.slice(start).map((row) => ({ flat: row[flatCol], names: row[nameCol] })));
+}
+
+// ---------- Reading a pasted list ----------
+
+// Finds the flat number in a line: "A-101", "B 304", "C12", "D/14", "Flat 12", "No. 7"...
+const FLAT_IN_LINE = /(?:\b(?:flat|unit|apt|apartment|door|house|no)\b\.?\s*(?:no\b\.?)?\s*[:#-]?\s*)?\b([A-Za-z]{0,2}\s?[-/]?\s?\d{1,5}[A-Za-z]?)\b/i;
+
+// One resident per line, in any order:
+//   A-101 Nivash  /  B-304 - Priya Sharma  /  Ravi Kumar, C-12  /  Flat 12: Meena
+export function parsePastedList(text) {
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) throw new Error("sheetEmpty");
+
+  return collect(lines.map((line) => {
+    line = line.replace(/^(\d{1,3}[.)]\s+|[-•*]\s+)/, ""); // drop list numbering like "1. " or "• "
+    const found = line.match(FLAT_IN_LINE);
+    if (!found) return { flat: "", names: "" };
+    const rest = line.slice(0, found.index) + " " + line.slice(found.index + found[0].length);
+    return {
+      flat: found[1].replace(/\s+/g, ""),
+      names: rest.replace(/^[\s,:;|()\-–]+|[\s,:;|()\-–]+$/g, ""), // tidy separators around the name
+    };
+  }));
+}
+
+// Shared by sheets and pasted lists: turns { flat, names } entries into a clean residents list
+function collect(entries) {
   const residents = [];
   const seen = new Set();
   let skipped = 0;
 
-  for (const row of rows.slice(start)) {
-    const flat = String(row[flatCol] ?? "").trim().toUpperCase();
+  for (const entry of entries) {
+    const flat = String(entry.flat ?? "").trim().toUpperCase();
     // One cell can hold several people: "Ravi, Priya" or "Ravi & Priya"
-    const names = String(row[nameCol] ?? "")
+    const names = String(entry.names ?? "")
       .split(/,|&|\band\b/i)
       .map((n) => n.trim().replace(/\s+/g, " "))
       .filter(Boolean);

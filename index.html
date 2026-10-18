@@ -11,12 +11,16 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header class="topbar">
-    <a href="#/" class="brand">
-      <span class="brand-mark" aria-hidden="true">F</span>
-      FlatDesk
-    </a>
-    <div id="who" class="who"></div>
+  <header class="header">
+    <div class="topbar">
+      <a href="#/" class="brand">
+        <span class="brand-mark" aria-hidden="true">F</span>
+        FlatDesk
+      </a>
+      <div id="who" class="who"></div>
+    </div>
+    <!-- "Admin view" strip, only shown to admins -->
+    <div id="mode-banner" class="mode-banner" hidden></div>
   </header>
 
   <!-- Each screen is drawn into here by app.js -->
