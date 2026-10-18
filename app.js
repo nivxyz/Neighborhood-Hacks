@@ -201,7 +201,7 @@ async function route() {
 
   // Make sure this building's data is loaded before showing it
   if (store.currentCode !== user.code) {
-    render(`<p class="empty">${t("loading")}</p>`);
+    render(skeleton());
     const found = await store.openBuilding(user.code);
     if (!found) {
       logOut();
@@ -512,7 +512,7 @@ function bindInviteBox(b) {
 // --- Join a building (resident or admin) ---
 
 async function showJoin(code, after) {
-  render(`<p class="empty">${t("loading")}</p>`);
+  render(skeleton());
   let b;
   try {
     if (code === store.DEMO_CODE) await store.ensureDemo(); // the demo link works even before anyone clicked "Try the demo"
@@ -616,6 +616,7 @@ function showBoard(live = false) {
     : [];
 
   const announcements = [...data.announcements].sort((a, b) => b.createdAt - a.createdAt);
+  const isEmpty = !all.length && !announcements.length; // a brand new building
 
   render(`
     <div class="page-head">
@@ -634,6 +635,7 @@ function showBoard(live = false) {
       </div>
     ` : ""}
 
+    ${isEmpty ? welcomeCard() : `
     <div class="stats">
       ${STATUSES.map((s, i) => `
         <div class="card stat stat-${s} appear" style="--i:${i}"><div class="stat-num">${count(s)}</div><div class="small muted">${t("status." + s)}</div></div>
@@ -675,6 +677,7 @@ function showBoard(live = false) {
     <div class="stack">
       ${shown.length ? shown.map(complaintCard).join("") : `<div class="card empty">${t("nothingHere")}</div>`}
     </div>
+    `}
   `, live);
 
   app.querySelectorAll(".chip").forEach((btn) => {
@@ -694,6 +697,49 @@ function showBoard(live = false) {
       toast(t("announcementRemoved"));
     };
   });
+}
+
+// Shown instead of an empty board, with what to do first
+function welcomeCard() {
+  if (user.isAdmin) {
+    return `
+      <div class="card welcome appear">
+        <h2>${t("welcomeAdminTitle")}</h2>
+        <p class="muted">${t("welcomeAdminText")}</p>
+        <ol class="welcome-steps">
+          <li>${t("tipShare")}</li>
+          <li>${t("tipAnnounce")}</li>
+          <li>${t("tipResidents")}</li>
+        </ol>
+        <div class="actions">
+          <a class="btn btn-whatsapp" target="_blank" rel="noopener" href="${whatsappLink(t("inviteMessage", store.building.name, inviteLink(user.code)))}">${t("shareInvite")}</a>
+          <a class="btn" href="#/announce">${t("postAnnouncementBtn")}</a>
+        </div>
+      </div>
+    `;
+  }
+  return `
+    <div class="card welcome appear">
+      <h2>${esc(t("welcomeResidentTitle", store.building.name))}</h2>
+      <p class="muted">${t("welcomeResidentText")}</p>
+      <div class="actions">
+        <a class="btn btn-primary" href="#/new">${t("postFirst")}</a>
+      </div>
+    </div>
+  `;
+}
+
+// Grey placeholder cards while a building loads
+function skeleton() {
+  return `
+    <div class="skeleton-wrap" role="status">
+      <span class="visually-hidden">${t("loading")}</span>
+      <div class="skeleton" style="width:40%;height:28px"></div>
+      <div class="skeleton" style="height:84px"></div>
+      <div class="skeleton" style="height:84px"></div>
+      <div class="skeleton" style="height:84px"></div>
+    </div>
+  `;
 }
 
 function chip(value, label) {

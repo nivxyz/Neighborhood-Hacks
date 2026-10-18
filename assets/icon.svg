@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- FlatDesk icon: an apartment building with a "fixed" tick -->
+  <rect width="512" height="512" rx="112" fill="#2f6fed"/>
+  <rect x="136" y="104" width="220" height="304" rx="20" fill="#fff"/>
+  <g fill="#2f6fed">
+    <rect x="170" y="140" width="44" height="40" rx="6"/>
+    <rect x="278" y="140" width="44" height="40" rx="6"/>
+    <rect x="170" y="206" width="44" height="40" rx="6"/>
+    <rect x="278" y="206" width="44" height="40" rx="6"/>
+    <rect x="170" y="272" width="44" height="40" rx="6"/>
+    <rect x="278" y="272" width="44" height="40" rx="6"/>
+    <rect x="222" y="336" width="48" height="72" rx="6"/>
+  </g>
+  <circle cx="370" cy="370" r="84" fill="#12b76a" stroke="#2f6fed" stroke-width="18"/>
+  <path d="M332 372l26 26 50-54" fill="none" stroke="#fff" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

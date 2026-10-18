@@ -111,14 +111,10 @@ p { margin: 0; }
 }
 
 .brand-mark {
-  display: grid;
-  place-items: center;
+  display: block;
   width: 30px;
   height: 30px;
   border-radius: 8px;
-  background: var(--brand);
-  color: #fff;
-  font-size: 16px;
 }
 
 .who {
@@ -636,6 +632,26 @@ input[type="file"]::file-selector-button {
 .admin-title { color: var(--brand); }
 .admin-card { border-color: var(--brand); background: var(--brand-soft); }
 .admin-card input, .admin-card select { background: var(--card); }
+
+/* ---------- Welcome card on a new, empty board ---------- */
+.welcome { padding: 22px 20px; border-color: var(--brand); }
+.welcome h2 { font-size: 19px; margin-bottom: 6px; }
+.welcome-steps { margin: 14px 0 0; padding-left: 22px; }
+.welcome-steps li { margin-bottom: 8px; padding-left: 4px; }
+.welcome-steps li::marker { color: var(--brand); font-weight: 700; }
+
+/* ---------- Loading placeholders ---------- */
+.skeleton-wrap { display: grid; gap: 12px; }
+.skeleton {
+  border-radius: var(--radius);
+  background: linear-gradient(90deg, var(--card) 25%, var(--line) 50%, var(--card) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.2s linear infinite;
+}
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
 
 /* ---------- Toasts ---------- */
 .toasts {
