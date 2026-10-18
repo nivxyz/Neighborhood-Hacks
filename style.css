@@ -45,15 +45,24 @@
   }
 }
 
-/* Admins see purple instead of blue, so admin and resident screens look different */
+/* Admins see purple instead of blue, so admin and resident screens look different.
+   A calm, slightly blue-leaning purple that sits well next to the app's grey-blue tones. */
 body.admin-mode {
-  --brand: #7c3aed;
-  --brand-soft: #f1eaff;
+  --brand: #5b4bc4;
+  --brand-soft: #f0eefb;
+  --brand-line: #d6d0f2;
+  --bg: #f6f5fb;
+  --banner-bg: #ebe8fa;
+  --banner-text: #4a3cae;
 }
 @media (prefers-color-scheme: dark) {
   body.admin-mode {
-    --brand: #8b5cf6;
-    --brand-soft: #2a2147;
+    --brand: #7464e6;
+    --brand-soft: #232042;
+    --brand-line: #3d3870;
+    --bg: #100f1a;
+    --banner-bg: #2a2552;
+    --banner-text: #d9d3ff;
   }
 }
 
@@ -604,7 +613,7 @@ input[type="file"]::file-selector-button {
   gap: 8px;
   margin-bottom: 16px;
   padding: 10px 12px;
-  border: 1px solid var(--brand);
+  border: 1px solid var(--brand-line);
   border-radius: 12px;
   background: var(--brand-soft);
   font-size: 13px;
@@ -614,9 +623,10 @@ input[type="file"]::file-selector-button {
 
 /* ---------- Admin view ---------- */
 .mode-banner {
-  padding: 5px 16px;
-  background: var(--brand);
-  color: #fff;
+  padding: 6px 16px;
+  background: var(--banner-bg);
+  color: var(--banner-text);
+  border-bottom: 1px solid var(--brand-line);
   font-size: 13px;
   font-weight: 600;
   text-align: center;
@@ -630,7 +640,7 @@ input[type="file"]::file-selector-button {
   font-weight: 700;
 }
 .admin-title { color: var(--brand); }
-.admin-card { border-color: var(--brand); background: var(--brand-soft); }
+.admin-card { border-color: var(--brand-line); background: var(--brand-soft); }
 .admin-card input, .admin-card select { background: var(--card); }
 
 /* ---------- Welcome card on a new, empty board ---------- */
