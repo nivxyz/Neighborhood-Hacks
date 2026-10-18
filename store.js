@@ -98,7 +98,7 @@ export async function ensureDemo() {
   await batch.commit();
 }
 
-// Loads one building's complaints and announcements, and keeps them up to date.
+// Loads one building's info, complaints and announcements, and keeps them up to date.
 // Returns false if the building doesn't exist.
 export async function openBuilding(code) {
   if (code === currentCode) return true;
@@ -114,7 +114,11 @@ export async function openBuilding(code) {
     data.announcements = localDb.buildings[code].announcements;
     return true;
   }
-  await Promise.all([listen(code, "complaints"), listen(code, "announcements")]);
+  await Promise.all([
+    listenToBuilding(code),
+    listen(code, "complaints"),
+    listen(code, "announcements"),
+  ]);
   return true;
 }
 
@@ -185,6 +189,27 @@ export function removeAnnouncement(id) {
   send(fb.deleteDoc(ref("announcements", id)));
 }
 
+// The residents list (admin only). arrayUnion/arrayRemove change just those people,
+// so two admins editing at once don't wipe each other's changes.
+export function addResidents(people) {
+  if (!usingFirebase) {
+    building.residents.push(...people);
+    return saveLocal();
+  }
+  send(fb.updateDoc(fb.doc(db, "buildings", currentCode), { residents: fb.arrayUnion(...people) }));
+}
+
+export function removeResident(person) {
+  if (!usingFirebase) {
+    building.residents = building.residents.filter((r) => !(r.name === person.name && r.flat === person.flat));
+    localDb.buildings[currentCode].info = building;
+    return saveLocal();
+  }
+  send(fb.updateDoc(fb.doc(db, "buildings", currentCode), {
+    residents: fb.arrayRemove({ name: person.name, flat: person.flat }),
+  }));
+}
+
 // ---------- Helpers ----------
 
 function ref(collection, id, code = currentCode) {
@@ -200,6 +225,28 @@ function listen(code, name) {
       (snap) => {
         if (code !== currentCode) return; // switched to another building meanwhile
         data[name] = snap.docs.map((d) => d.data());
+        if (first) {
+          first = false;
+          resolve();
+        } else {
+          onChange();
+        }
+      },
+      (err) => (first ? reject(err) : onError(err))
+    );
+    stopListening.push(stop);
+  });
+}
+
+// Keeps the building's info (like the residents list) up to date
+function listenToBuilding(code) {
+  return new Promise((resolve, reject) => {
+    let first = true;
+    const stop = fb.onSnapshot(
+      fb.doc(db, "buildings", code),
+      (snap) => {
+        if (code !== currentCode || !snap.exists()) return;
+        building = snap.data();
         if (first) {
           first = false;
           resolve();

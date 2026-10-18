@@ -9,11 +9,15 @@ service cloud.firestore {
     match /buildings/{code} {
       allow get: if true;
       allow list: if false;
-      // Only brand new buildings, with a sensible size. Nobody can change or delete one.
+      // Only brand new buildings, with a sensible size.
       allow create: if request.resource.data.code == code
                     && request.resource.data.residents is list
                     && request.resource.data.residents.size() <= 5000;
-      allow update, delete: if false;
+      // After that, only the residents list can change (admin adding or removing people).
+      allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['residents'])
+                    && request.resource.data.residents is list
+                    && request.resource.data.residents.size() <= 5000;
+      allow delete: if false;
 
       match /complaints/{id} {
         allow read, create, update: if true;

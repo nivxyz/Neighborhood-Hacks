@@ -28,15 +28,12 @@ function namesMatch(typed, listed) {
 }
 
 // Is this person on the list? Their flat must be on it, and their name close to a name in that flat.
+// Returns { resident } or { error: "noFlat" | "noName", flat } (app.js turns the error into a message).
 export function checkResident(residents, name, flat) {
   const inFlat = residents.filter((r) => flatKey(r.flat) === flatKey(flat));
-  if (!inFlat.length) {
-    return { error: `Flat ${flat} isn't on this building's list. Check the number, or ask your admin to add you.` };
-  }
+  if (!inFlat.length) return { error: "noFlat", flat };
   const match = inFlat.find((r) => namesMatch(name, r.name));
-  if (!match) {
-    return { error: `That name doesn't match anyone in flat ${inFlat[0].flat}. Use the name your admin has on the list.` };
-  }
+  if (!match) return { error: "noName", flat: inFlat[0].flat };
   return { resident: match };
 }
 
@@ -48,12 +45,13 @@ function loadSheetJS() {
     const script = document.createElement("script");
     script.src = SHEETJS;
     script.onload = resolve;
-    script.onerror = () => reject(new Error("Couldn't load the Excel reader. Check your internet."));
+    script.onerror = () => reject(new Error("excelLoad"));
     document.head.appendChild(script);
   });
 }
 
-// Returns { residents: [{ name, flat }], skipped } or throws an Error with a friendly message
+// Returns { residents: [{ name, flat }], skipped }.
+// Problems throw an Error whose message is a key app.js translates: "sheetEmpty", "needTwoCols", "noRows".
 export async function readResidentsFile(file) {
   await loadSheetJS();
   const book = file.name.toLowerCase().endsWith(".csv")
@@ -66,7 +64,7 @@ export async function readResidentsFile(file) {
 
 function parseRows(rows) {
   rows = rows.filter((row) => row.some((cell) => String(cell).trim()));
-  if (!rows.length) throw new Error("That sheet is empty.");
+  if (!rows.length) throw new Error("sheetEmpty");
 
   // Look for a header row like "Name | Flat No." in the first few rows
   let nameCol = -1;
@@ -87,7 +85,7 @@ function parseRows(rows) {
   // No header: guess. The column that mostly has numbers in it is the flat number.
   if (flatCol === -1) {
     const width = Math.max(...rows.map((r) => r.length));
-    if (width < 2) throw new Error("The sheet needs two columns: name and flat number.");
+    if (width < 2) throw new Error("needTwoCols");
     const digitShare = (col) => rows.filter((r) => /\d/.test(r[col] || "")).length / rows.length;
     const cols = [...Array(width).keys()].sort((a, b) => digitShare(b) - digitShare(a));
     flatCol = cols[0];
@@ -118,7 +116,7 @@ function parseRows(rows) {
     }
   }
 
-  if (!residents.length) throw new Error("Couldn't find any names and flat numbers in that sheet.");
+  if (!residents.length) throw new Error("noRows");
   return { residents, skipped };
 }
 

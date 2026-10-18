@@ -150,7 +150,17 @@ p { margin: 0; }
   cursor: pointer;
 }
 
-label { display: block; font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+label, .label { display: block; font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+
+/* Hidden on screen, still read out by screen readers */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
 
 input, textarea, select {
   width: 100%;
@@ -262,7 +272,7 @@ select {
 /* ---------- Stats ---------- */
 .stats {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 10px;
 }
 .stat { text-align: center; padding: 12px 8px; }
@@ -270,6 +280,70 @@ select {
 .stat-reported .stat-num { color: var(--reported); }
 .stat-progress .stat-num { color: var(--progress); }
 .stat-resolved .stat-num { color: var(--resolved); }
+.stat-time .stat-num { font-size: 18px; line-height: 36px; }
+
+/* ---------- Overdue and "Needs attention" ---------- */
+.pill.overdue { background: var(--reported); color: #fff; }
+.attention-title { color: var(--reported); }
+.attention { border-left: 4px solid var(--reported); }
+
+/* ---------- Photos ---------- */
+.complaint-card { display: flex; gap: 14px; align-items: flex-start; }
+.complaint-main { flex: 1; min-width: 0; }
+.thumb {
+  flex: none;
+  width: 64px;
+  height: 64px;
+  border-radius: 10px;
+  object-fit: cover;
+  background: var(--bg);
+}
+.photo-pick { position: relative; }
+.photo-pick:has(input:focus-visible) { outline: 2px solid var(--brand); outline-offset: 2px; }
+.photo-preview { display: flex; align-items: flex-end; gap: 12px; margin-top: 4px; }
+.photo-preview img {
+  max-width: 160px;
+  max-height: 160px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+}
+.photo-full {
+  display: block;
+  margin-top: 14px;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: zoom-in;
+}
+.photo-full img {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+}
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 16px;
+  background: rgba(0, 0, 0, .85);
+  cursor: zoom-out;
+  animation: toast-in .2s ease;
+}
+.lightbox img { max-width: 100%; max-height: calc(100vh - 90px); border-radius: 10px; }
+
+/* ---------- Residents page ---------- */
+.add-row { display: flex; gap: 8px; }
+.add-row input { flex: 1; min-width: 0; }
+.mini-table td:last-child { width: 1%; }
+.btn-danger { color: var(--reported); }
+.btn-danger:hover { border-color: var(--reported); }
 
 /* ---------- Filter chips ---------- */
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
@@ -587,4 +661,8 @@ input[type="file"]::file-selector-button {
   h1 { font-size: 21px; }
   .landing-hero h1 { font-size: 27px; }
   .hero-actions .btn { width: 100%; }
+  .stats { grid-template-columns: repeat(2, 1fr); }
+  .add-row { flex-wrap: wrap; }
+  .add-row input { flex-basis: 40%; }
+  .thumb { width: 52px; height: 52px; }
 }

@@ -1,19 +1,23 @@
 // FlatDesk: complaint tracker and announcement board for apartment buildings.
-// This file draws the screens. store.js saves the data (Firebase, or this browser).
-// roster.js reads the admin's residents sheet and checks people against it.
+// This file draws the screens. Other files do the rest:
+//   store.js   saves the data (Firebase, or this browser)
+//   roster.js  reads the admin's residents sheet and checks people against it
+//   photo.js   shrinks complaint photos
+//   i18n.js    all on-screen text, in English and Hindi
 
 import * as store from "./store.js";
-import { checkResident, readResidentsFile, sampleSheetUrl, flatKey } from "./roster.js";
+import { checkResident, readResidentsFile, sampleSheetUrl, flatKey, nameKey } from "./roster.js";
+import { shrinkPhoto, isSafePhoto } from "./photo.js";
+import { t, has, getLang, setLang, LANGUAGES } from "./i18n.js";
 
 // ---------- Settings ----------
 
 const CATEGORIES = ["Water", "Electricity", "Lift", "Plumbing", "Garbage", "Security", "Parking", "Other"];
+const STATUSES = ["reported", "progress", "resolved"];
 
-const STATUS = {
-  reported: "Reported",
-  progress: "In progress",
-  resolved: "Resolved",
-};
+const DAY = 24 * 60 * 60 * 1000;
+const OVERDUE_DAYS = 3;       // complaints open this long turn red
+const QUIET_ADMIN_DAYS = 2;   // no admin update for this long → "Needs attention"
 
 // ---------- Who is logged in (remembered on this device) ----------
 
@@ -69,12 +73,18 @@ function newId() {
 
 function timeAgo(ms) {
   const mins = Math.round((Date.now() - ms) / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return mins + "m ago";
+  if (mins < 1) return t("justNow");
+  if (mins < 60) return t("minsAgo", mins);
   const hours = Math.round(mins / 60);
-  if (hours < 24) return hours + "h ago";
-  const days = Math.round(hours / 24);
-  return days + "d ago";
+  if (hours < 24) return t("hoursAgo", hours);
+  return t("daysAgo", Math.round(hours / 24));
+}
+
+// 5 hours, 2.1 days...
+function duration(ms) {
+  const hours = ms / (60 * 60 * 1000);
+  if (hours < 24) return t("hours", Math.max(1, Math.round(hours)));
+  return t("days", (hours / 24).toFixed(1).replace(/\.0$/, ""));
 }
 
 function userKey() {
@@ -82,7 +92,7 @@ function userKey() {
 }
 
 function statusPill(status) {
-  return `<span class="pill status-${status}">${STATUS[status]}</span>`;
+  return `<span class="pill status-${status}">${t("status." + status)}</span>`;
 }
 
 function toast(message) {
@@ -120,9 +130,54 @@ function whatsappLink(text) {
 
 function copyText(text) {
   navigator.clipboard.writeText(text).then(
-    () => toast("Link copied"),
-    () => toast("Couldn't copy. Select the link and copy it yourself.")
+    () => toast(t("linkCopied")),
+    () => toast(t("copyFailed"))
   );
+}
+
+// ---------- How long complaints have been waiting ----------
+
+function daysOpen(c) {
+  return Math.floor((Date.now() - c.createdAt) / DAY);
+}
+
+function isOverdue(c) {
+  return c.status !== "resolved" && daysOpen(c) >= OVERDUE_DAYS;
+}
+
+function lastAdminUpdate(c) {
+  const times = c.updates.filter((u) => u.admin).map((u) => u.at);
+  return times.length ? Math.max(...times) : null;
+}
+
+// Open a long time, or the admin hasn't said anything for a while
+function needsAttention(c) {
+  if (c.status === "resolved") return false;
+  const quietSince = lastAdminUpdate(c) ?? c.createdAt;
+  return isOverdue(c) || Date.now() - quietSince >= QUIET_ADMIN_DAYS * DAY;
+}
+
+function attentionReason(c) {
+  const last = lastAdminUpdate(c);
+  if (!last) return t("noAdminUpdate");
+  return t("noUpdateFor", Math.floor((Date.now() - last) / DAY));
+}
+
+// Average time from "posted" to "resolved"
+function averageFixTime() {
+  const times = data.complaints
+    .filter((c) => c.status === "resolved")
+    .map((c) => {
+      const resolved = c.updates.filter((u) => u.status === "resolved").pop();
+      return resolved ? resolved.at - c.createdAt : 0;
+    })
+    .filter((ms) => ms > 0);
+  if (!times.length) return null;
+  return times.reduce((a, b) => a + b, 0) / times.length;
+}
+
+function overdueBadge(c) {
+  return isOverdue(c) ? `<span class="pill overdue">${t("openDays", daysOpen(c))}</span>` : "";
 }
 
 // ---------- Screens ----------
@@ -146,15 +201,16 @@ async function route() {
 
   // Make sure this building's data is loaded before showing it
   if (store.currentCode !== user.code) {
-    render(`<p class="empty">Loading…</p>`);
+    render(`<p class="empty">${t("loading")}</p>`);
     const found = await store.openBuilding(user.code);
     if (!found) {
       logOut();
-      toast("That building doesn't exist any more");
+      toast(t("buildingGone"));
       return route();
     }
     if (currentPath() !== path) return; // you moved on while it was loading
   }
+  if (!stillOnList()) return;
 
   if (path === "/new") return showNewComplaint();
   if (path === "/announce") return user.isAdmin ? showNewAnnouncement() : go("/");
@@ -163,14 +219,26 @@ async function route() {
   showBoard();
 }
 
+// If the admin removed you from the residents list, you're logged out
+function stillOnList() {
+  const b = store.building;
+  if (user.isAdmin || b.open || !checkResident(b.residents, user.name, user.flat).error) return true;
+  logOut();
+  toast(t("removedFromList"));
+  go("/");
+  route();
+  return false;
+}
+
 // Called when the data changes (you or someone else posted something).
-// Redraws the board or complaint page quietly, but never wipes a form you're typing in.
+// Redraws the board, complaint or residents page quietly, but never wipes a form you're typing in.
 function refresh() {
-  if (!user || store.currentCode !== user.code) return;
+  if (!user || store.currentCode !== user.code || !stillOnList()) return;
   const path = currentPath();
-  const note = document.getElementById("note");
+  const typing = [...app.querySelectorAll("input:not([type=file]):not([readonly]), textarea")].some((el) => el.value);
   if (path === "/") showBoard(true);
-  else if (path.startsWith("/c/") && !(note && note.value)) showComplaint(path.slice(3), true);
+  else if (path.startsWith("/c/") && !typing) showComplaint(path.slice(3), true);
+  else if (path === "/residents") showResidents(true); // keeps what you've typed, see showResidents
 }
 
 // live = true means "same screen, new data": skip the slide-in animation and keep the scroll position
@@ -181,15 +249,21 @@ function render(html, live = false) {
 
 function drawTopbar() {
   const who = document.getElementById("who");
-  if (!user) {
-    who.innerHTML = "";
-    return;
-  }
   who.innerHTML = `
-    <span class="who-name">${esc(user.name)} · ${esc(user.flat)}${user.isAdmin ? " · Admin" : ""}</span>
-    <button class="btn btn-small" id="logout">Log out</button>
+    <button class="btn btn-small" id="lang" lang="${LANGUAGES[getLang()].next}">${LANGUAGES[getLang()].switchLabel}</button>
+    ${user ? `
+      <span class="who-name">${esc(user.name)} · ${esc(user.flat)}${user.isAdmin ? " · " + t("admin") : ""}</span>
+      <button class="btn btn-small" id="logout">${t("logOut")}</button>
+    ` : ""}
   `;
-  document.getElementById("logout").onclick = () => {
+
+  document.getElementById("lang").onclick = () => {
+    setLang(LANGUAGES[getLang()].next);
+    route(); // draw the same screen again in the new language
+  };
+
+  const logout = document.getElementById("logout");
+  if (logout) logout.onclick = () => {
     logOut();
     go("/");
     route();
@@ -201,41 +275,33 @@ function drawTopbar() {
 function showLanding() {
   render(`
     <section class="landing-hero">
-      <span class="eyebrow">For apartment buildings and housing societies</span>
-      <h1>Your building's complaints, in one place</h1>
-      <p>No more complaints lost in the WhatsApp group. Residents post problems, neighbours tap "Me too", and everyone can see when it's fixed.</p>
+      <span class="eyebrow">${t("eyebrow")}</span>
+      <h1>${t("heroTitle")}</h1>
+      <p>${t("heroText")}</p>
       <div class="hero-actions">
-        <a class="btn btn-primary btn-big" href="#/register">Register your apartment</a>
-        <button class="btn btn-big" id="try-demo">Try the demo</button>
+        <a class="btn btn-primary btn-big" href="#/register">${t("registerApartment")}</a>
+        <button class="btn btn-big" id="try-demo">${t("tryDemo")}</button>
       </div>
     </section>
 
     <form class="card code-card" id="code-form">
-      <label for="code">Got a building code from your admin?</label>
+      <label for="code">${t("haveCode")}</label>
       <div class="code-row">
-        <input id="code" required maxlength="8" placeholder="e.g. K7QM3P" autocomplete="off" autocapitalize="characters">
-        <button class="btn btn-primary">Join</button>
+        <input id="code" required maxlength="8" placeholder="K7QM3P" autocomplete="off" autocapitalize="characters">
+        <button class="btn btn-primary">${t("join")}</button>
       </div>
-      <p class="small muted">Invite links from WhatsApp open your building directly.</p>
+      <p class="small muted">${t("inviteOpensDirectly")}</p>
     </form>
 
-    <div class="section-title">How it works</div>
+    <div class="section-title">${t("howItWorks")}</div>
     <div class="steps">
-      <div class="card step appear" style="--i:0">
-        <span class="step-num">1</span>
-        <h2>Admin registers the building</h2>
-        <p class="muted">The secretary or president uploads an Excel sheet of residents and their flat numbers.</p>
-      </div>
-      <div class="card step appear" style="--i:1">
-        <span class="step-num">2</span>
-        <h2>Residents join from WhatsApp</h2>
-        <p class="muted">They tap the invite link and enter their flat number and name. Only people on the list get in.</p>
-      </div>
-      <div class="card step appear" style="--i:2">
-        <span class="step-num">3</span>
-        <h2>Every complaint gets tracked</h2>
-        <p class="muted">Reported, in progress, resolved. Water and power cut notices stay pinned on top.</p>
-      </div>
+      ${[1, 2, 3].map((n, i) => `
+        <div class="card step appear" style="--i:${i}">
+          <span class="step-num">${n}</span>
+          <h2>${t("step" + n + "Title")}</h2>
+          <p class="muted">${t("step" + n + "Text")}</p>
+        </div>
+      `).join("")}
     </div>
   `);
 
@@ -251,7 +317,7 @@ function showLanding() {
       go("/b/" + store.DEMO_CODE);
     } catch (err) {
       console.error(err);
-      toast("Couldn't open the demo. Check your internet.");
+      toast(t("demoFailed"));
       e.target.disabled = false;
     }
   };
@@ -259,42 +325,47 @@ function showLanding() {
 
 // --- Register a building (admin) ---
 
+// Turns a sheet-reading problem into a message in the current language
+function sheetError(err) {
+  return has(err.message) ? t(err.message) : t("sheetUnreadable");
+}
+
 function showRegister() {
   let residents = null; // filled in once a sheet is read
 
   render(`
     <div class="page-head">
-      <h1>Register your apartment</h1>
-      <a href="#/">Cancel</a>
+      <h1>${t("registerApartment")}</h1>
+      <a href="#/">${t("cancel")}</a>
     </div>
     <form class="card" id="register-form">
       <div class="field">
-        <label for="b-name">Apartment or society name</label>
-        <input id="b-name" required maxlength="60" placeholder="e.g. Green Park Residency">
+        <label for="b-name">${t("buildingName")}</label>
+        <input id="b-name" required maxlength="60" placeholder="${t("buildingNameEg")}">
       </div>
       <div class="row">
         <div class="field">
-          <label for="r-name">Your name</label>
+          <label for="r-name">${t("yourName")}</label>
           <input id="r-name" required maxlength="40" autocomplete="name">
         </div>
         <div class="field">
-          <label for="r-flat">Your flat</label>
-          <input id="r-flat" required maxlength="10" placeholder="e.g. A-101">
+          <label for="r-flat">${t("yourFlat")}</label>
+          <input id="r-flat" required maxlength="10" placeholder="${t("flatEg")}">
         </div>
       </div>
       <div class="field">
-        <label for="r-pin">Admin PIN (4 to 8 digits)</label>
+        <label for="r-pin">${t("adminPinNew")}</label>
         <input id="r-pin" required type="password" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8">
-        <p class="hint">You'll use this to log in as admin. Don't share it.</p>
+        <p class="hint">${t("adminPinHint")}</p>
       </div>
       <div class="field">
-        <label for="r-file">Residents list</label>
+        <label for="r-file">${t("residentsList")}</label>
         <input id="r-file" type="file" accept=".xlsx,.xls,.csv">
-        <p class="hint">An Excel or CSV sheet with a <strong>Name</strong> column and a <strong>Flat</strong> column, one row per resident.
-          <a href="${sampleSheetUrl()}" download="flatdesk-residents-sample.csv">Download a sample sheet</a></p>
+        <p class="hint">${t("residentsListHint")}
+          <a href="${sampleSheetUrl()}" download="flatdesk-residents-sample.csv">${t("sampleSheet")}</a></p>
         <div id="sheet-result" aria-live="polite"></div>
       </div>
-      <button class="btn btn-primary" id="create-btn">Create building</button>
+      <button class="btn btn-primary" id="create-btn">${t("createBuilding")}</button>
     </form>
   `);
 
@@ -304,20 +375,20 @@ function showRegister() {
     const file = e.target.files[0];
     residents = null;
     if (!file) return (result.innerHTML = "");
-    result.innerHTML = `<p class="hint">Reading ${esc(file.name)}…</p>`;
+    result.innerHTML = `<p class="hint">${esc(t("reading", file.name))}</p>`;
     try {
       const sheet = await readResidentsFile(file);
       residents = sheet.residents;
       result.innerHTML = sheetPreview(sheet);
     } catch (err) {
-      result.innerHTML = `<p class="form-error">${esc(err.message)}</p>`;
+      result.innerHTML = `<p class="form-error">${esc(sheetError(err))}</p>`;
     }
   };
 
   document.getElementById("register-form").onsubmit = async (e) => {
     e.preventDefault();
     if (!residents) {
-      result.innerHTML = `<p class="form-error">Please add your residents list first.</p>`;
+      result.innerHTML = `<p class="form-error">${t("addListFirst")}</p>`;
       document.getElementById("r-file").focus();
       return;
     }
@@ -333,7 +404,7 @@ function showRegister() {
 
     const button = document.getElementById("create-btn");
     button.disabled = true;
-    button.textContent = "Creating…";
+    button.textContent = t("creating");
     try {
       const b = await store.createBuilding(
         { name, adminName, adminFlat, residents: list, open: false, createdAt: Date.now() },
@@ -344,9 +415,9 @@ function showRegister() {
       showRegistered(b);
     } catch (err) {
       console.error(err);
-      toast(err.message || "Couldn't create the building");
+      toast(t("createFailed"));
       button.disabled = false;
-      button.textContent = "Create building";
+      button.textContent = t("createBuilding");
     }
   };
 }
@@ -355,15 +426,15 @@ function sheetPreview({ residents, skipped }) {
   const flats = new Set(residents.map((r) => flatKey(r.flat))).size;
   return `
     <div class="sheet-ok appear">
-      <p><strong>✓ Found ${residents.length} ${residents.length === 1 ? "resident" : "residents"} in ${flats} ${flats === 1 ? "flat" : "flats"}</strong>
-        ${skipped ? `<span class="muted">(skipped ${skipped} ${skipped === 1 ? "row" : "rows"} with no name or flat)</span>` : ""}</p>
+      <p><strong>${t("foundResidents", residents.length, flats)}</strong>
+        ${skipped ? `<span class="muted">${t("skippedRows", skipped)}</span>` : ""}</p>
       <table class="mini-table">
-        <thead><tr><th>Name</th><th>Flat</th></tr></thead>
+        <thead><tr><th>${t("name")}</th><th>${t("flat")}</th></tr></thead>
         <tbody>
           ${residents.slice(0, 5).map((r) => `<tr><td>${esc(r.name)}</td><td>${esc(r.flat)}</td></tr>`).join("")}
         </tbody>
       </table>
-      ${residents.length > 5 ? `<p class="hint">…and ${residents.length - 5} more</p>` : ""}
+      ${residents.length > 5 ? `<p class="hint">${t("andMore", residents.length - 5)}</p>` : ""}
     </div>
   `;
 }
@@ -374,10 +445,10 @@ function showRegistered(b) {
   render(`
     <div class="card done-card">
       <div class="done-icon" aria-hidden="true">✓</div>
-      <h1>${esc(b.name)} is on FlatDesk</h1>
-      <p class="muted">Send this link to your building's WhatsApp group. Residents tap it and enter their flat number and name.</p>
+      <h1>${esc(t("isOnFlatDesk", b.name))}</h1>
+      <p class="muted">${t("sendLinkText")}</p>
       ${inviteBox(b)}
-      <a class="btn btn-primary" href="#/" style="margin-top:20px">Go to your building's board</a>
+      <a class="btn btn-primary" href="#/" style="margin-top:20px">${t("goToBoard")}</a>
     </div>
   `);
   bindInviteBox(b);
@@ -386,14 +457,12 @@ function showRegistered(b) {
 function inviteBox(b) {
   return `
     <div class="invite">
-      <div class="invite-code">Building code <strong>${esc(b.code)}</strong></div>
+      <div class="invite-code">${t("buildingCode")} <strong>${esc(b.code)}</strong></div>
       <div class="code-row">
         <input id="invite-link" readonly value="${esc(inviteLink(b.code))}">
-        <button type="button" class="btn" id="copy-invite">Copy</button>
+        <button type="button" class="btn" id="copy-invite">${t("copy")}</button>
       </div>
-      <a class="btn btn-whatsapp" target="_blank" rel="noopener" href="${whatsappLink(
-        `🏢 ${b.name} now uses FlatDesk for complaints and notices.\n\nJoin here: ${inviteLink(b.code)}\nJust enter your flat number and name.`
-      )}">Share on WhatsApp</a>
+      <a class="btn btn-whatsapp" target="_blank" rel="noopener" href="${whatsappLink(t("inviteMessage", b.name, inviteLink(b.code)))}">${t("shareWhatsApp")}</a>
     </div>
   `;
 }
@@ -406,9 +475,10 @@ function bindInviteBox(b) {
 // --- Join a building (resident or admin) ---
 
 async function showJoin(code, after) {
-  render(`<p class="empty">Loading…</p>`);
+  render(`<p class="empty">${t("loading")}</p>`);
   let b;
   try {
+    if (code === store.DEMO_CODE) await store.ensureDemo(); // the demo link works even before anyone clicked "Try the demo"
     b = await store.getBuilding(code);
   } catch (err) {
     console.error(err);
@@ -417,8 +487,8 @@ async function showJoin(code, after) {
   if (!b) {
     render(`
       <div class="card empty">
-        <h2>No building with code ${esc(code)}</h2>
-        <p style="margin-top:8px">Check the code or the link your admin sent. <a href="#/">Back to the start</a></p>
+        <h2>${esc(t("noBuilding", code))}</h2>
+        <p style="margin-top:8px">${t("checkCode")} <a href="#/">${t("backToStart")}</a></p>
       </div>
     `);
     return;
@@ -426,29 +496,29 @@ async function showJoin(code, after) {
 
   render(`
     <div class="hero">
-      <span class="eyebrow">Joining</span>
+      <span class="eyebrow">${t("joining")}</span>
       <h1>${esc(b.name)}</h1>
-      <p>Enter your flat number and name as your building admin has them.</p>
+      <p>${t("joinText")}</p>
     </div>
     <form class="card login" id="join-form">
       <div class="field">
-        <label for="flat">Flat number</label>
-        <input id="flat" required maxlength="10" placeholder="e.g. B-304">
+        <label for="flat">${t("flatNumber")}</label>
+        <input id="flat" required maxlength="10" placeholder="${t("flatEg2")}">
       </div>
       <div class="field">
-        <label for="name">Your name</label>
+        <label for="name">${t("yourName")}</label>
         <input id="name" required maxlength="40" autocomplete="name">
       </div>
       <div class="field">
-        <label class="check"><input type="checkbox" id="is-admin"> I'm the building admin</label>
+        <label class="check"><input type="checkbox" id="is-admin"> ${t("iAmAdmin")}</label>
       </div>
       <div class="field" id="pin-field" hidden>
-        <label for="pin">Admin PIN</label>
+        <label for="pin">${t("adminPin")}</label>
         <input id="pin" type="password" inputmode="numeric" maxlength="8">
       </div>
       <p class="form-error" id="join-error" hidden></p>
-      <button class="btn btn-primary" style="width:100%">Continue</button>
-      ${b.open ? `<p class="demo-note">This is the demo building: any name and flat works. The admin PIN is <strong>1234</strong>.</p>` : ""}
+      <button class="btn btn-primary" style="width:100%">${t("continue")}</button>
+      ${b.open ? `<p class="demo-note">${t("demoNote")}</p>` : ""}
     </form>
   `);
 
@@ -468,21 +538,21 @@ async function showJoin(code, after) {
 
   document.getElementById("join-form").onsubmit = async (e) => {
     e.preventDefault();
-    let name = document.getElementById("name").value.trim();
+    const name = document.getElementById("name").value.trim();
     let flat = document.getElementById("flat").value.trim().toUpperCase();
     const isAdmin = adminBox.checked;
 
     if (isAdmin) {
-      if ((await store.hashPin(b.code, pinInput.value)) !== b.pinHash) return showError("Wrong admin PIN.");
+      if ((await store.hashPin(b.code, pinInput.value)) !== b.pinHash) return showError(t("wrongPin"));
     } else if (!b.open) {
       const check = checkResident(b.residents, name, flat);
-      if (check.error) return showError(check.error);
+      if (check.error) return showError(t(check.error, check.flat));
       flat = check.resident.flat; // the flat as written on the list; the name stays as they typed it
     }
 
     user = { code: b.code, buildingName: b.name, name, flat, isAdmin };
     saveUser();
-    toast("Welcome, " + name);
+    toast(t("welcome", name));
     go(after);
   };
 }
@@ -492,6 +562,7 @@ async function showJoin(code, after) {
 function showBoard(live = false) {
   const all = data.complaints;
   const count = (s) => all.filter((c) => c.status === s).length;
+  const fixTime = averageFixTime();
 
   // Unresolved first, then the ones with the most "me too", then newest
   const shown = all
@@ -502,45 +573,70 @@ function showBoard(live = false) {
       b.createdAt - a.createdAt
     );
 
+  // Admin's to-do list: oldest first
+  const attention = user.isAdmin
+    ? all.filter(needsAttention).sort((a, b) => a.createdAt - b.createdAt)
+    : [];
+
   const announcements = [...data.announcements].sort((a, b) => b.createdAt - a.createdAt);
 
   render(`
     <div class="page-head">
       <div>
-        <div class="small muted">Building board</div>
+        <div class="small muted">${t("buildingBoard")}</div>
         <h1>${esc(store.building.name)}</h1>
       </div>
-      <a class="btn btn-primary" href="#/new">+ New complaint</a>
+      <a class="btn btn-primary" href="#/new">${t("newComplaint")}</a>
     </div>
 
     ${user.isAdmin ? `
       <div class="admin-bar">
-        <span>Admin</span>
-        <a class="btn btn-small" href="#/announce">+ Post announcement</a>
-        <a class="btn btn-small" href="#/residents">Residents and invite link</a>
+        <span>${t("admin")}</span>
+        <a class="btn btn-small" href="#/announce">${t("postAnnouncementBtn")}</a>
+        <a class="btn btn-small" href="#/residents">${t("residentsAndInvite")}</a>
       </div>
     ` : ""}
 
     <div class="stats">
-      <div class="card stat stat-reported appear" style="--i:0"><div class="stat-num">${count("reported")}</div><div class="small muted">Reported</div></div>
-      <div class="card stat stat-progress appear" style="--i:1"><div class="stat-num">${count("progress")}</div><div class="small muted">In progress</div></div>
-      <div class="card stat stat-resolved appear" style="--i:2"><div class="stat-num">${count("resolved")}</div><div class="small muted">Resolved</div></div>
+      ${STATUSES.map((s, i) => `
+        <div class="card stat stat-${s} appear" style="--i:${i}"><div class="stat-num">${count(s)}</div><div class="small muted">${t("status." + s)}</div></div>
+      `).join("")}
+      <div class="card stat stat-time appear" style="--i:3"><div class="stat-num">${fixTime ? duration(fixTime) : "—"}</div><div class="small muted">${t("avgFixTime")}</div></div>
     </div>
 
-    <div class="section-title">Announcements</div>
+    ${attention.length ? `
+      <div class="section-title attention-title">⚠ ${t("needsAttention")} (${attention.length})</div>
+      <p class="hint" style="margin:-6px 0 10px">${t("needsAttentionHint")}</p>
+      <div class="stack">
+        ${attention.map((c, i) => `
+          <a class="card card-link attention appear" style="--i:${i}" href="#/c/${c.id}">
+            <div class="complaint-top">
+              <h2>${esc(c.title)}</h2>
+              ${statusPill(c.status)}
+            </div>
+            <div class="complaint-meta">
+              ${overdueBadge(c)}
+              <span>${attentionReason(c)}</span>
+              <span>·</span>
+              <span>${esc(c.flat)}</span>
+            </div>
+          </a>
+        `).join("")}
+      </div>
+    ` : ""}
+
+    <div class="section-title">${t("announcements")}</div>
     <div class="stack">
-      ${announcements.length ? announcements.map(announcementCard).join("") : `<div class="card empty">No announcements right now.</div>`}
+      ${announcements.length ? announcements.map(announcementCard).join("") : `<div class="card empty">${t("noAnnouncements")}</div>`}
     </div>
 
-    <div class="section-title">Complaints</div>
-    <div class="chips" role="group" aria-label="Filter complaints">
-      ${chip("all", "All (" + all.length + ")")}
-      ${chip("reported", "Reported")}
-      ${chip("progress", "In progress")}
-      ${chip("resolved", "Resolved")}
+    <div class="section-title">${t("complaints")}</div>
+    <div class="chips" role="group" aria-label="${t("complaints")}">
+      ${chip("all", t("all") + " (" + all.length + ")")}
+      ${STATUSES.map((s) => chip(s, t("status." + s))).join("")}
     </div>
     <div class="stack">
-      ${shown.length ? shown.map(complaintCard).join("") : `<div class="card empty">Nothing here. Lucky building!</div>`}
+      ${shown.length ? shown.map(complaintCard).join("") : `<div class="card empty">${t("nothingHere")}</div>`}
     </div>
   `, live);
 
@@ -554,7 +650,7 @@ function showBoard(live = false) {
   app.querySelectorAll("[data-remove]").forEach((btn) => {
     btn.onclick = () => {
       store.removeAnnouncement(btn.dataset.remove);
-      toast("Announcement removed");
+      toast(t("announcementRemoved"));
     };
   });
 }
@@ -572,100 +668,180 @@ function announcementCard(a, i) {
           <div class="small muted">${timeAgo(a.createdAt)}</div>
           <h2>${esc(a.title)}</h2>
         </div>
-        ${user.isAdmin ? `<button class="btn btn-small" data-remove="${a.id}">Remove</button>` : ""}
+        ${user.isAdmin ? `<button class="btn btn-small" data-remove="${a.id}">${t("remove")}</button>` : ""}
       </div>
       ${a.when ? `<div class="announce-when">${esc(a.when)}</div>` : ""}
       ${a.body ? `<p style="margin-top:6px">${esc(a.body)}</p>` : ""}
-      <a class="btn btn-small btn-whatsapp" style="margin-top:12px" href="${whatsappLink(shareAnnouncementText(a))}" target="_blank" rel="noopener">Share on WhatsApp</a>
+      <a class="btn btn-small btn-whatsapp" style="margin-top:12px" href="${whatsappLink(shareAnnouncementText(a))}" target="_blank" rel="noopener">${t("shareWhatsApp")}</a>
     </div>
   `;
 }
 
 function complaintCard(c, i) {
+  const photo = isSafePhoto(c.photo) ? `<img class="thumb" src="${c.photo}" alt="${t("hasPhoto")}" loading="lazy">` : "";
   return `
-    <a class="card card-link appear" style="--i:${i}" href="#/c/${c.id}">
-      <div class="complaint-top">
-        <h2>${esc(c.title)}</h2>
-        ${statusPill(c.status)}
+    <a class="card card-link complaint-card appear" style="--i:${i}" href="#/c/${c.id}">
+      <div class="complaint-main">
+        <div class="complaint-top">
+          <h2>${esc(c.title)}</h2>
+          ${statusPill(c.status)}
+        </div>
+        <div class="complaint-meta">
+          <span class="pill pill-cat">${t("cat." + c.category)}</span>
+          ${overdueBadge(c)}
+          <span>${esc(c.flat)}</span>
+          <span>·</span>
+          <span>${timeAgo(c.createdAt)}</span>
+          ${c.meToo.length ? `<span>·</span><span>${t("othersAffected", c.meToo.length)}</span>` : ""}
+        </div>
       </div>
-      <div class="complaint-meta">
-        <span class="pill pill-cat">${esc(c.category)}</span>
-        <span>${esc(c.flat)}</span>
-        <span>·</span>
-        <span>${timeAgo(c.createdAt)}</span>
-        ${c.meToo.length ? `<span>·</span><span>${c.meToo.length} ${c.meToo.length === 1 ? "other" : "others"} affected</span>` : ""}
-      </div>
+      ${photo}
     </a>
   `;
 }
 
 // --- Residents list and invite link (admin only) ---
 
-function showResidents() {
+function showResidents(live = false) {
   const b = store.building;
+  // When redrawing with new data, keep whatever the admin has typed in the boxes
+  const kept = {};
+  if (live) ["add-name", "add-flat", "r-search"].forEach((id) => (kept[id] = document.getElementById(id)?.value || ""));
+
   const residents = [...(b.residents || [])].sort((x, y) =>
-    x.flat.localeCompare(y.flat, undefined, { numeric: true })
+    x.flat.localeCompare(y.flat, undefined, { numeric: true }) || x.name.localeCompare(y.name)
   );
 
   render(`
     <div class="page-head">
-      <h1>Residents</h1>
-      <a href="#/">← Board</a>
+      <h1>${t("residents")}</h1>
+      <a href="#/">${t("backToBoard")}</a>
     </div>
 
-    <div class="section-title" style="margin-top:0">Invite link</div>
+    <div class="section-title" style="margin-top:0">${t("inviteLink")}</div>
     <div class="card">${inviteBox(b)}</div>
 
-    <div class="section-title">${b.open ? "Demo building: anyone can join" : `${residents.length} people on the list`}</div>
-    ${residents.length ? `
+    ${b.open ? `<div class="section-title">${t("demoAnyone")}</div>` : `
+      <div class="section-title">${t("addResident")}</div>
+      <form class="card" id="add-form">
+        <div class="add-row">
+          <input id="add-name" required maxlength="40" placeholder="${t("name")}" aria-label="${t("name")}">
+          <input id="add-flat" required maxlength="10" placeholder="${t("flat")}" aria-label="${t("flat")}">
+          <button class="btn btn-primary">${t("add")}</button>
+        </div>
+        <label for="add-file" class="hint" style="margin-top:14px;font-weight:500">${t("addFromSheet")}</label>
+        <input id="add-file" type="file" accept=".xlsx,.xls,.csv">
+      </form>
+
+      <div class="section-title">${t("peopleOnList", residents.length)}</div>
       <div class="card">
-        <input id="r-search" placeholder="Search by name or flat" style="margin-bottom:12px">
+        <input id="r-search" placeholder="${t("searchResidents")}" style="margin-bottom:12px">
         <table class="mini-table" id="r-table">
-          <thead><tr><th>Name</th><th>Flat</th></tr></thead>
+          <thead><tr><th>${t("name")}</th><th>${t("flat")}</th><th><span class="visually-hidden">${t("remove")}</span></th></tr></thead>
           <tbody>
-            ${residents.map((r) => `<tr><td>${esc(r.name)}</td><td>${esc(r.flat)}</td></tr>`).join("")}
+            ${residents.map((r, i) => `
+              <tr>
+                <td>${esc(r.name)}</td>
+                <td>${esc(r.flat)}</td>
+                <td><button class="btn btn-small btn-danger" data-resident="${i}">${t("remove")}</button></td>
+              </tr>
+            `).join("")}
           </tbody>
         </table>
       </div>
-    ` : ""}
-  `);
+    `}
+  `, live);
 
   bindInviteBox(b);
+  if (b.open) return;
+  Object.entries(kept).forEach(([id, value]) => (document.getElementById(id).value = value));
+
+  // Add one person
+  document.getElementById("add-form").onsubmit = (e) => {
+    e.preventDefault();
+    const name = document.getElementById("add-name").value.trim();
+    const flat = document.getElementById("add-flat").value.trim().toUpperCase();
+    if (isOnList(residents, name, flat)) return toast(t("alreadyOnList"));
+    document.getElementById("add-name").value = "";
+    document.getElementById("add-flat").value = "";
+    store.addResidents([{ name, flat }]);
+    toast(t("added", 1));
+  };
+
+  // Add everyone from another sheet (people already on the list are skipped)
+  document.getElementById("add-file").onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const sheet = await readResidentsFile(file);
+      const fresh = sheet.residents.filter((r) => !isOnList(residents, r.name, r.flat));
+      if (fresh.length) store.addResidents(fresh);
+      toast(fresh.length ? t("added", fresh.length) : t("alreadyOnList"));
+    } catch (err) {
+      toast(sheetError(err));
+    }
+    e.target.value = "";
+  };
+
+  // Remove someone
+  app.querySelectorAll("[data-resident]").forEach((btn) => {
+    btn.onclick = () => {
+      const r = residents[btn.dataset.resident];
+      if (!confirm(t("confirmRemove", r.name, r.flat))) return;
+      store.removeResident(r);
+      toast(t("removedResident", r.name));
+    };
+  });
 
   const search = document.getElementById("r-search");
-  if (search) search.oninput = () => {
+  search.oninput = () => {
     const q = search.value.toLowerCase();
     document.querySelectorAll("#r-table tbody tr").forEach((row) => {
       row.hidden = !row.textContent.toLowerCase().includes(q);
     });
   };
+  search.oninput();
+}
+
+function isOnList(list, name, flat) {
+  return list.some((r) => flatKey(r.flat) === flatKey(flat) && nameKey(r.name) === nameKey(name));
 }
 
 // --- New complaint ---
 
 function showNewComplaint() {
+  let photo = null; // the shrunk photo, once one is picked
+
   render(`
     <div class="page-head">
-      <h1>New complaint</h1>
-      <a href="#/">Cancel</a>
+      <h1>${t("newComplaintTitle")}</h1>
+      <a href="#/">${t("cancel")}</a>
     </div>
     <form class="card" id="complaint-form">
       <div class="field">
-        <label for="title">What's the problem?</label>
-        <input id="title" required maxlength="80" placeholder="e.g. No water in C block since morning">
+        <label for="title">${t("whatProblem")}</label>
+        <input id="title" required maxlength="80" placeholder="${t("problemEg")}">
       </div>
       <div class="field">
-        <label for="category">Category</label>
+        <label for="category">${t("category")}</label>
         <select id="category">
-          ${CATEGORIES.map((c) => `<option>${c}</option>`).join("")}
+          ${CATEGORIES.map((c) => `<option value="${c}">${t("cat." + c)}</option>`).join("")}
         </select>
       </div>
       <div id="similar" aria-live="polite"></div>
       <div class="field">
-        <label for="desc">Details (optional)</label>
-        <textarea id="desc" maxlength="500" placeholder="Where exactly, since when, anything else the admin should know"></textarea>
+        <label for="desc">${t("details")}</label>
+        <textarea id="desc" maxlength="500" placeholder="${t("detailsEg")}"></textarea>
       </div>
-      <button class="btn btn-primary">Post complaint</button>
+      <div class="field">
+        <span class="label">${t("photo")}</span>
+        <label class="btn photo-pick" id="photo-pick">
+          <input type="file" id="photo-input" accept="image/*" class="visually-hidden">
+          ${t("addPhoto")}
+        </label>
+        <div id="photo-preview"></div>
+      </div>
+      <button class="btn btn-primary" id="post-btn">${t("postComplaint")}</button>
     </form>
   `);
 
@@ -675,14 +851,46 @@ function showNewComplaint() {
   titleInput.oninput = showSimilar;
   categoryInput.onchange = showSimilar;
 
+  const photoInput = document.getElementById("photo-input");
+  const preview = document.getElementById("photo-preview");
+  const pick = document.getElementById("photo-pick");
+  const postBtn = document.getElementById("post-btn");
+
+  photoInput.onchange = async () => {
+    const file = photoInput.files[0];
+    if (!file) return;
+    preview.innerHTML = `<p class="hint">${t("preparingPhoto")}</p>`;
+    postBtn.disabled = true;
+    try {
+      photo = await shrinkPhoto(file);
+      preview.innerHTML = `
+        <div class="photo-preview appear">
+          <img src="${photo}" alt="${t("photoAlt")}">
+          <button type="button" class="btn btn-small" id="photo-remove">${t("removePhoto")}</button>
+        </div>
+      `;
+      pick.hidden = true;
+      document.getElementById("photo-remove").onclick = () => {
+        photo = null;
+        preview.innerHTML = "";
+        photoInput.value = "";
+        pick.hidden = false;
+      };
+    } catch (err) {
+      photo = null;
+      preview.innerHTML = `<p class="form-error">${t("photoFailed")}</p>`;
+    }
+    postBtn.disabled = false;
+  };
+
   document.getElementById("complaint-form").onsubmit = (e) => {
     e.preventDefault();
     const now = Date.now();
     const complaint = {
       id: newId(),
-      title: document.getElementById("title").value.trim(),
+      title: titleInput.value.trim(),
       desc: document.getElementById("desc").value.trim(),
-      category: document.getElementById("category").value,
+      category: categoryInput.value,
       flat: user.flat,
       author: user.name,
       createdAt: now,
@@ -690,8 +898,9 @@ function showNewComplaint() {
       meToo: [],
       updates: [{ status: "reported", text: "Complaint posted", at: now }],
     };
+    if (photo) complaint.photo = photo;
     store.addComplaint(complaint);
-    toast("Complaint posted");
+    toast(t("complaintPosted"));
     go("/c/" + complaint.id);
   };
 }
@@ -703,15 +912,16 @@ const STOP_WORDS = new Set([
   "the", "and", "for", "not", "since", "from", "with", "near", "our", "has", "have", "are",
   "was", "this", "that", "there", "block", "floor", "flat", "today", "morning", "evening",
   "night", "working", "problem", "issue", "very", "again", "still", "please",
+  "नहीं", "सुबह", "शाम", "रात", "समस्या", "ब्लॉक", "फ्लैट",
 ]);
 
-// "Lights not working!" → ["light"]
+// "Lights not working!" → ["light"]. Works for Hindi words too.
 function keywords(text) {
   return text
     .toLowerCase()
-    .split(/[^a-z0-9]+/)
+    .split(/[^\p{L}\p{M}\p{N}]+/u)
     .filter((w) => w.length >= 3 && !STOP_WORDS.has(w))
-    .map((w) => (w.length > 3 && w.endsWith("s") ? w.slice(0, -1) : w));
+    .map((w) => (/^[a-z]+s$/.test(w) && w.length > 3 ? w.slice(0, -1) : w));
 }
 
 // Open complaints that share words with what's being typed. Same category counts extra.
@@ -740,14 +950,14 @@ function drawSimilar(title, category) {
   }
   box.innerHTML = `
     <div class="similar appear">
-      <p class="similar-head">Is it one of these? Tap <strong>Me too</strong> instead of posting it again.</p>
+      <p class="similar-head">${t("similarHead")}</p>
       ${matches.map((c) => `
         <div class="similar-item">
           <div>
             <div class="similar-title">${esc(c.title)}</div>
-            <div class="small muted">${STATUS[c.status]} · ${c.meToo.length + 1} ${c.meToo.length ? "flats" : "flat"} affected</div>
+            <div class="small muted">${t("status." + c.status)} · ${t("flatsAffected", c.meToo.length + 1)}</div>
           </div>
-          <button type="button" class="btn btn-small" data-same="${c.id}">Me too</button>
+          <button type="button" class="btn btn-small" data-same="${c.id}">${t("meToo")}</button>
         </div>
       `).join("")}
     </div>
@@ -757,7 +967,7 @@ function drawSimilar(title, category) {
     btn.onclick = () => {
       const c = data.complaints.find((x) => x.id === btn.dataset.same);
       if (!c.meToo.includes(userKey())) store.setMeToo(c, userKey(), true);
-      toast("Added you to this complaint");
+      toast(t("addedToComplaint"));
       go("/c/" + c.id);
     };
   });
@@ -766,13 +976,7 @@ function drawSimilar(title, category) {
 // --- WhatsApp messages ---
 
 function shareComplaintText(c) {
-  const affected = c.meToo.length + 1;
-  return [
-    `🚨 ${c.title}`,
-    `${STATUS[c.status]} · ${affected} ${affected === 1 ? "flat" : "flats"} affected`,
-    "",
-    `Same problem? Tap "Me too" here: ${pageLink("/b/" + user.code + "/c/" + c.id)}`,
-  ].join("\n");
+  return t("shareComplaint", c.title, t("status." + c.status), c.meToo.length + 1, pageLink("/b/" + user.code + "/c/" + c.id));
 }
 
 function shareAnnouncementText(a) {
@@ -781,8 +985,30 @@ function shareAnnouncementText(a) {
     a.when ? `🕒 ${a.when}` : "",
     a.body,
     "",
-    `More on FlatDesk: ${inviteLink(user.code)}`,
+    `${t("shareAnnouncementMore")} ${inviteLink(user.code)}`,
   ].filter((line, i) => line || i === 3).join("\n");
+}
+
+// --- Full-size photo ---
+
+function openPhoto(src) {
+  const box = document.createElement("div");
+  box.className = "lightbox";
+  box.setAttribute("role", "dialog");
+  box.setAttribute("aria-label", t("photoAlt"));
+  box.innerHTML = `
+    <img src="${src}" alt="${t("photoAlt")}">
+    <button class="btn btn-small lightbox-close">${t("close")}</button>
+  `;
+  const close = () => {
+    box.remove();
+    document.removeEventListener("keydown", onKey);
+  };
+  const onKey = (e) => e.key === "Escape" && close();
+  box.onclick = close;
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(box);
+  box.querySelector(".lightbox-close").focus();
 }
 
 // --- One complaint, with its history ---
@@ -790,7 +1016,7 @@ function shareAnnouncementText(a) {
 function showComplaint(id, live = false) {
   const c = data.complaints.find((x) => x.id === id);
   if (!c) {
-    render(`<div class="card empty">That complaint doesn't exist any more. <a href="#/">Back to the board</a></div>`, live);
+    render(`<div class="card empty">${t("complaintGone")} <a href="#/">${t("backToBoardLink")}</a></div>`, live);
     return;
   }
 
@@ -799,39 +1025,45 @@ function showComplaint(id, live = false) {
 
   render(`
     <div class="page-head">
-      <a href="#/">← Board</a>
+      <a href="#/">${t("backToBoard")}</a>
       ${statusPill(c.status)}
     </div>
 
     <div class="card">
       <h1>${esc(c.title)}</h1>
       <div class="complaint-meta">
-        <span class="pill pill-cat">${esc(c.category)}</span>
-        <span>by ${esc(c.author)}, ${esc(c.flat)}</span>
+        <span class="pill pill-cat">${t("cat." + c.category)}</span>
+        ${overdueBadge(c)}
+        <span>${esc(t("byAuthor", c.author, c.flat))}</span>
         <span>·</span>
         <span>${timeAgo(c.createdAt)}</span>
       </div>
       ${c.desc ? `<p style="margin-top:14px">${esc(c.desc)}</p>` : ""}
+      ${isSafePhoto(c.photo) ? `
+        <button class="photo-full" id="photo-open" aria-label="${t("photoAlt")}">
+          <img src="${c.photo}" alt="${t("photoAlt")}">
+        </button>
+      ` : ""}
 
       <div class="actions">
         ${ownComplaint ? "" : `
           <button class="btn metoo${mine ? " on" : ""}" id="metoo" aria-pressed="${mine}">
-            ${mine ? "✓ You have this too" : "Me too"} · <span class="metoo-count${bumpMeToo ? " bump" : ""}">${c.meToo.length}</span>
+            ${mine ? t("youHaveThis") : t("meToo")} · <span class="metoo-count${bumpMeToo ? " bump" : ""}">${c.meToo.length}</span>
           </button>
         `}
-        <a class="btn btn-whatsapp" href="${whatsappLink(shareComplaintText(c))}" target="_blank" rel="noopener">Share on WhatsApp</a>
+        <a class="btn btn-whatsapp" href="${whatsappLink(shareComplaintText(c))}" target="_blank" rel="noopener">${t("shareWhatsApp")}</a>
       </div>
-      ${ownComplaint && c.meToo.length ? `<p class="small muted" style="margin-top:14px">${c.meToo.length} other ${c.meToo.length === 1 ? "flat has" : "flats have"} the same problem.</p>` : ""}
+      ${ownComplaint && c.meToo.length ? `<p class="small muted" style="margin-top:14px">${t("othersHaveIt", c.meToo.length)}</p>` : ""}
     </div>
 
-    <div class="section-title">Updates</div>
+    <div class="section-title">${t("updates")}</div>
     <div class="card">
       <ul class="timeline">
         ${c.updates.map((u) => `
           <li class="t-${u.status}">
             <div class="t-body${u.id && u.id === glowUpdateId ? " glow" : ""}">
-              <div><strong>${STATUS[u.status]}</strong> <span class="small muted">· ${timeAgo(u.at)}${u.admin ? " · Admin" : ""}</span></div>
-              <div>${esc(u.text)}</div>
+              <div><strong>${t("status." + u.status)}</strong> <span class="small muted">· ${timeAgo(u.at)}${u.admin ? " · " + t("admin") : ""}</span></div>
+              <div>${!u.admin && u.text === "Complaint posted" ? t("complaintPosted") : esc(u.text)}</div>
             </div>
           </li>
         `).join("")}
@@ -847,6 +1079,9 @@ function showComplaint(id, live = false) {
   glowUpdateId = null;
   bumpMeToo = false;
 
+  const photoBtn = document.getElementById("photo-open");
+  if (photoBtn) photoBtn.onclick = () => openPhoto(c.photo);
+
   const meTooBtn = document.getElementById("metoo");
   if (meTooBtn) meTooBtn.onclick = () => toggleMeToo(c);
 
@@ -859,19 +1094,19 @@ function showComplaint(id, live = false) {
 
 function adminControls(c) {
   return `
-    <div class="section-title">Admin: post an update</div>
+    <div class="section-title">${t("adminPostUpdate")}</div>
     <form class="card" id="update-form">
       <div class="field">
-        <label for="new-status">Status</label>
+        <label for="new-status">${t("status")}</label>
         <select id="new-status">
-          ${Object.keys(STATUS).map((s) => `<option value="${s}"${s === c.status ? " selected" : ""}>${STATUS[s]}</option>`).join("")}
+          ${STATUSES.map((s) => `<option value="${s}"${s === c.status ? " selected" : ""}>${t("status." + s)}</option>`).join("")}
         </select>
       </div>
       <div class="field">
-        <label for="note">Note for residents</label>
-        <input id="note" required maxlength="200" placeholder="e.g. Plumber coming at 4 PM today">
+        <label for="note">${t("noteForResidents")}</label>
+        <input id="note" required maxlength="200" placeholder="${t("noteEg")}">
       </div>
-      <button class="btn btn-primary">Post update</button>
+      <button class="btn btn-primary">${t("postUpdate")}</button>
     </form>
   `;
 }
@@ -889,7 +1124,7 @@ function postUpdate(c) {
   note.value = ""; // clear it first, so the page is allowed to redraw with the new update
   glowUpdateId = update.id;
   store.addUpdate(c, update);
-  toast(status === "resolved" ? "Marked as resolved" : "Update posted");
+  toast(status === "resolved" ? t("markedResolved") : t("updatePosted"));
 }
 
 // --- New announcement (admin only) ---
@@ -897,23 +1132,23 @@ function postUpdate(c) {
 function showNewAnnouncement() {
   render(`
     <div class="page-head">
-      <h1>Post announcement</h1>
-      <a href="#/">Cancel</a>
+      <h1>${t("postAnnouncement")}</h1>
+      <a href="#/">${t("cancel")}</a>
     </div>
     <form class="card" id="announce-form">
       <div class="field">
-        <label for="a-title">Title</label>
-        <input id="a-title" required maxlength="80" placeholder="e.g. Power cut for transformer repair">
+        <label for="a-title">${t("title")}</label>
+        <input id="a-title" required maxlength="80" placeholder="${t("titleEg")}">
       </div>
       <div class="field">
-        <label for="a-when">When (optional)</label>
-        <input id="a-when" maxlength="60" placeholder="e.g. Tuesday, 2 PM to 5 PM">
+        <label for="a-when">${t("when")}</label>
+        <input id="a-when" maxlength="60" placeholder="${t("whenEg")}">
       </div>
       <div class="field">
-        <label for="a-body">Details (optional)</label>
+        <label for="a-body">${t("details")}</label>
         <textarea id="a-body" maxlength="400"></textarea>
       </div>
-      <button class="btn btn-primary">Post announcement</button>
+      <button class="btn btn-primary">${t("postAnnouncement")}</button>
     </form>
   `);
 
@@ -926,7 +1161,7 @@ function showNewAnnouncement() {
       body: document.getElementById("a-body").value.trim(),
       createdAt: Date.now(),
     });
-    toast("Announcement posted");
+    toast(t("announcementPosted"));
     go("/");
   };
 }
@@ -938,7 +1173,7 @@ store
     onChange: refresh,
     onError: (err) => {
       console.error(err);
-      toast("Couldn't save. Check your internet and try again.");
+      toast(t("saveFailed"));
     },
   })
   .then(() => {
@@ -947,5 +1182,5 @@ store
   })
   .catch((err) => {
     console.error(err);
-    app.innerHTML = `<div class="card empty">Couldn't load FlatDesk: ${esc(err.message)}</div>`;
+    app.innerHTML = `<div class="card empty">${t("loadFailed")} ${esc(err.message)}</div>`;
   });
