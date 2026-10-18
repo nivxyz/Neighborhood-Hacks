@@ -52,6 +52,7 @@ let user = loadUser();   // { code, buildingName, name, flat, isAdmin }
 let filter = "all";      // which complaints the board shows
 let glowUpdateId = null; // the update that should glow after the admin posts it
 let bumpMeToo = false;   // makes the "Me too" count bounce after you tap it
+let editingId = null;    // the complaint you're editing, if any
 
 const app = document.getElementById("app");
 
@@ -166,7 +167,7 @@ function attentionReason(c) {
 // Average time from "posted" to "resolved"
 function averageFixTime() {
   const times = data.complaints
-    .filter((c) => c.status === "resolved")
+    .filter((c) => c.status === "resolved" && !c.hidden)
     .map((c) => {
       const resolved = c.updates.filter((u) => u.status === "resolved").pop();
       return resolved ? resolved.at - c.createdAt : 0;
@@ -197,6 +198,8 @@ async function route() {
   }
 
   if (path === "/register") return showRegister();
+  const recover = path.match(/^\/recover\/([A-Za-z0-9]+)$/);
+  if (recover) return showRecover(recover[1].toUpperCase());
   if (!user) return showLanding();
 
   // Make sure this building's data is loaded before showing it
@@ -215,6 +218,7 @@ async function route() {
   if (path === "/new") return showNewComplaint();
   if (path === "/announce") return user.isAdmin ? showNewAnnouncement() : go("/");
   if (path === "/residents") return user.isAdmin ? showResidents() : go("/");
+  if (path === "/account") return user.isAdmin ? go("/") : showAccount();
   if (path.startsWith("/c/")) return showComplaint(path.slice(3));
   showBoard();
 }
@@ -252,7 +256,9 @@ function drawTopbar() {
   who.innerHTML = `
     <button class="btn btn-small" id="lang" lang="${LANGUAGES[getLang()].next}">${LANGUAGES[getLang()].switchLabel}</button>
     ${user ? `
-      <span class="who-name">${esc(user.name)} · ${esc(user.flat)}</span>
+      ${user.isAdmin
+        ? `<span class="who-name">${esc(user.name)} · ${esc(user.flat)}</span>`
+        : `<a class="who-name who-link" href="#/account" title="${t("yourAccount")}">${esc(user.name)} · ${esc(user.flat)}</a>`}
       ${user.isAdmin ? `<span class="role-pill">${t("admin")}</span>` : ""}
       <button class="btn btn-small" id="logout">${t("logOut")}</button>
     ` : ""}
@@ -321,8 +327,8 @@ function showLanding() {
   document.getElementById("try-demo").onclick = async (e) => {
     e.target.disabled = true;
     try {
-      await store.ensureDemo();
-      go("/b/" + store.DEMO_CODE);
+      const demo = await store.createDemo(); // a fresh demo building just for this visitor
+      go("/b/" + demo.code);
     } catch (err) {
       console.error(err);
       toast(t("demoFailed"));
@@ -367,6 +373,12 @@ function showRegister() {
         <p class="hint">${t("adminPinHint")}</p>
       </div>
       <div class="field">
+        <label for="r-email">${t("recoveryEmail")}</label>
+        <input id="r-email" required type="email" maxlength="100" autocomplete="email" placeholder="name@example.com">
+        <p class="hint">${t("recoveryEmailHint")}</p>
+      </div>
+      ${photoField(t("buildingPhoto"), t("buildingPhotoHint"))}
+      <div class="field">
         <label for="r-file">${t("residentsList")}</label>
         <input id="r-file" type="file" accept="${RESIDENT_FILE_TYPES}">
         <p class="hint">${t("residentsListHint")}
@@ -374,11 +386,20 @@ function showRegister() {
         ${pasteBox("r-paste")}
         <div id="sheet-result" aria-live="polite"></div>
       </div>
+      <p class="form-error" id="register-error" hidden></p>
       <button class="btn btn-primary" id="create-btn">${t("createBuilding")}</button>
     </form>
   `);
 
+  let photo = null;
+  bindPhotoField(document.getElementById("create-btn"), (p) => (photo = p));
+
   const result = document.getElementById("sheet-result");
+  const errorBox = document.getElementById("register-error");
+  const showError = (message) => {
+    errorBox.textContent = message;
+    errorBox.hidden = false;
+  };
   const fileInput = document.getElementById("r-file");
   const pasteInput = document.getElementById("r-paste");
 
@@ -413,6 +434,12 @@ function showRegister() {
 
   document.getElementById("register-form").onsubmit = async (e) => {
     e.preventDefault();
+    errorBox.hidden = true;
+    if (!photo) {
+      showError(t("addBuildingPhoto"));
+      document.getElementById("photo-input").focus();
+      return;
+    }
     if (!residents) {
       result.innerHTML = `<p class="form-error">${t("addListFirst")}</p>`;
       document.getElementById("r-file").focus();
@@ -423,6 +450,7 @@ function showRegister() {
     const adminName = document.getElementById("r-name").value.trim();
     const adminFlat = document.getElementById("r-flat").value.trim().toUpperCase();
     const pin = document.getElementById("r-pin").value;
+    const email = document.getElementById("r-email").value.trim().toLowerCase();
 
     // Make sure the admin is on the list too
     const list = [...residents];
@@ -433,15 +461,24 @@ function showRegister() {
     button.textContent = t("creating");
     try {
       const b = await store.createBuilding(
-        { name, adminName, adminFlat, residents: list, open: false, createdAt: Date.now() },
-        pin
+        { name, adminName, adminFlat, photo, residents: list, open: false, createdAt: Date.now() },
+        pin,
+        email
       );
-      user = { code: b.code, buildingName: b.name, name: adminName, flat: adminFlat, isAdmin: true };
+      const session = await store.adminLogin(b, pin);
+      user = { code: b.code, buildingName: b.name, name: adminName, flat: adminFlat, isAdmin: true, session };
       saveUser();
       showRegistered(b);
     } catch (err) {
       console.error(err);
-      toast(t("createFailed"));
+      // Firebase explains email problems with codes like "auth/invalid-email"
+      const emailProblems = {
+        "auth/invalid-email": "badEmail",
+        "auth/operation-not-allowed": "emailSetupOff",
+        "auth/too-many-requests": "tooManyTries",
+        "auth/network-request-failed": "saveFailed",
+      };
+      showError(t(emailProblems[err.code] || "createFailed"));
       button.disabled = false;
       button.textContent = t("createBuilding");
     }
@@ -511,11 +548,20 @@ function bindInviteBox(b) {
 
 // --- Join a building (resident or admin) ---
 
+// Which resident this is, for passwords: their flat + the name on the list
+function memberId(name, flat) {
+  return flatKey(flat) + "_" + nameKey(name).replace(/\s+/g, "-");
+}
+
 async function showJoin(code, after) {
   render(skeleton());
   let b;
   try {
-    if (code === store.DEMO_CODE) await store.ensureDemo(); // the demo link works even before anyone clicked "Try the demo"
+    if (code === "DEMO") {
+      // Old shared demo link: make a fresh personal demo instead
+      const demo = await store.createDemo();
+      return location.replace("#/b/" + demo.code);
+    }
     b = await store.getBuilding(code);
   } catch (err) {
     console.error(err);
@@ -532,6 +578,7 @@ async function showJoin(code, after) {
   }
 
   render(`
+    ${isSafePhoto(b.photo) ? `<img class="building-photo join-photo" src="${b.photo}" alt="${esc(b.name)}">` : ""}
     <div class="hero">
       <span class="eyebrow">${t("joining")}</span>
       <h1>${esc(b.name)}</h1>
@@ -546,15 +593,21 @@ async function showJoin(code, after) {
         <label for="name">${t("yourName")}</label>
         <input id="name" required maxlength="40" autocomplete="name">
       </div>
+      <div class="field" id="password-field" hidden>
+        <label for="password">${t("password")}</label>
+        <input id="password" type="password" maxlength="40" autocomplete="current-password">
+        <p class="hint">${t("forgotPasswordHint")}</p>
+      </div>
       <div class="field">
         <label class="check"><input type="checkbox" id="is-admin"> ${t("iAmAdmin")}</label>
       </div>
       <div class="field" id="pin-field" hidden>
         <label for="pin">${t("adminPin")}</label>
         <input id="pin" type="password" inputmode="numeric" maxlength="8">
+        ${b.open ? "" : `<p class="hint"><a href="#/recover/${esc(b.code)}">${t("forgotPin")}</a></p>`}
       </div>
       <p class="form-error" id="join-error" hidden></p>
-      <button class="btn btn-primary" style="width:100%">${t("continue")}</button>
+      <button class="btn btn-primary" id="join-btn" style="width:100%">${t("continue")}</button>
       ${b.open ? `<p class="demo-note">${t("demoNote")}</p>` : ""}
     </form>
   `);
@@ -562,7 +615,10 @@ async function showJoin(code, after) {
   const adminBox = document.getElementById("is-admin");
   const pinField = document.getElementById("pin-field");
   const pinInput = document.getElementById("pin");
+  const passwordField = document.getElementById("password-field");
+  const passwordInput = document.getElementById("password");
   const errorBox = document.getElementById("join-error");
+  const joinBtn = document.getElementById("join-btn");
   adminBox.onchange = () => {
     pinField.hidden = !adminBox.checked;
     pinInput.required = adminBox.checked;
@@ -575,35 +631,235 @@ async function showJoin(code, after) {
 
   document.getElementById("join-form").onsubmit = async (e) => {
     e.preventDefault();
+    errorBox.hidden = true;
     const name = document.getElementById("name").value.trim();
     let flat = document.getElementById("flat").value.trim().toUpperCase();
     const isAdmin = adminBox.checked;
+    let session = null;
+    let member = null;
+    const usedPassword = !passwordField.hidden && passwordInput.value;
 
-    if (isAdmin) {
-      if ((await store.hashPin(b.code, pinInput.value)) !== b.pinHash) return showError(t("wrongPin"));
-    } else if (!b.open) {
-      const check = checkResident(b.residents, name, flat);
-      if (check.error) return showError(t(check.error, check.flat));
-      flat = check.resident.flat; // the flat as written on the list; the name stays as they typed it
+    joinBtn.disabled = true;
+    try {
+      if (isAdmin) {
+        session = await store.adminLogin(b, pinInput.value);
+        if (!session) return showError(t("wrongPin"));
+      } else {
+        let listedName = name;
+        if (!b.open) {
+          const check = checkResident(b.residents, name, flat);
+          if (check.error) return showError(t(check.error, check.flat));
+          flat = check.resident.flat; // the flat as written on the list; the name stays as they typed it
+          listedName = check.resident.name;
+        }
+        member = memberId(listedName, flat);
+        const result = await store.residentLogin(b.code, member, usedPassword || null);
+        if (result === "needPassword") {
+          // This resident added a password: ask for it
+          passwordField.hidden = false;
+          passwordInput.required = true;
+          passwordInput.focus();
+          return showError(t("needPassword"));
+        }
+        if (result === "wrong") return showError(t("wrongPassword"));
+      }
+    } catch (err) {
+      console.error(err);
+      return showError(t("saveFailed"));
+    } finally {
+      joinBtn.disabled = false;
     }
 
-    user = { code: b.code, buildingName: b.name, name, flat, isAdmin };
+    user = { code: b.code, buildingName: b.name, name, flat, isAdmin, session, member, hasPassword: Boolean(usedPassword) };
     saveUser();
     toast(t("welcome", name));
     go(after);
   };
 }
 
+// --- Forgot admin PIN: recovery by email ---
+
+async function showRecover(code) {
+  render(skeleton());
+  let b = null;
+  try {
+    b = await store.getBuilding(code);
+  } catch (err) {
+    console.error(err);
+  }
+  if (!b || b.open) {
+    render(`<div class="card empty"><h2>${esc(t("noBuilding", code))}</h2><p style="margin-top:8px"><a href="#/">${t("backToStart")}</a></p></div>`);
+    return;
+  }
+
+  render(`
+    <div class="page-head">
+      <div>
+        <div class="small muted">${esc(b.name)}</div>
+        <h1>${t("forgotPinTitle")}</h1>
+      </div>
+      <a href="#/b/${esc(code)}">${t("cancel")}</a>
+    </div>
+
+    <div class="section-title" style="margin-top:0">${t("recoverStep1")}</div>
+    <form class="card" id="send-form">
+      <p class="muted" style="margin-bottom:14px">${t("recoverStep1Text")}</p>
+      <div class="field">
+        <label for="rec-email">${t("recoveryEmail")}</label>
+        <input id="rec-email" required type="email" autocomplete="email">
+      </div>
+      <p class="form-ok" id="send-ok" hidden>${t("recoverySent")}</p>
+      <button class="btn btn-primary">${t("sendLink")}</button>
+    </form>
+
+    <div class="section-title">${t("recoverStep2")}</div>
+    <form class="card" id="signin-form">
+      <p class="muted" style="margin-bottom:14px">${t("recoverStep2Text")}</p>
+      <div class="field">
+        <label for="rec-email2">${t("recoveryEmail")}</label>
+        <input id="rec-email2" required type="email" autocomplete="email">
+      </div>
+      <div class="field">
+        <label for="rec-password">${t("recoveryPassword")}</label>
+        <input id="rec-password" required type="password" autocomplete="current-password">
+      </div>
+      <p class="form-error" id="signin-error" hidden></p>
+      <button class="btn btn-primary">${t("signIn")}</button>
+    </form>
+    <div id="pin-result"></div>
+  `);
+
+  document.getElementById("send-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const email = document.getElementById("rec-email").value.trim().toLowerCase();
+    try {
+      await store.sendRecoveryEmail(email);
+    } catch (err) {
+      console.error(err); // don't say whether the email exists; just show the same message
+    }
+    document.getElementById("send-ok").hidden = false;
+    document.getElementById("rec-email2").value = email;
+  };
+
+  document.getElementById("signin-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const errorBox = document.getElementById("signin-error");
+    errorBox.hidden = true;
+    try {
+      const pin = await store.recoverySignIn(
+        code,
+        document.getElementById("rec-email2").value.trim().toLowerCase(),
+        document.getElementById("rec-password").value
+      );
+      showPinResult(code, pin);
+    } catch (err) {
+      console.error(err);
+      errorBox.textContent = t(has(err.message) ? err.message : "saveFailed");
+      errorBox.hidden = false;
+    }
+  };
+}
+
+// After signing in with the recovery email: see the PIN, or set a new one
+function showPinResult(code, pin) {
+  document.getElementById("signin-form").hidden = true;
+  const box = document.getElementById("pin-result");
+  box.innerHTML = `
+    <form class="card admin-card appear" id="newpin-form">
+      <p>${t("yourPinIs")} <strong class="pin-show">${esc(pin)}</strong></p>
+      <div class="field" style="margin-top:14px">
+        <label for="new-pin">${t("newPin")}</label>
+        <input id="new-pin" type="password" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" required>
+      </div>
+      <div class="actions" style="margin-top:0">
+        <button class="btn btn-primary">${t("changePin")}</button>
+        <a class="btn" href="#/b/${esc(code)}">${t("backToLogin")}</a>
+      </div>
+    </form>
+  `;
+  document.getElementById("newpin-form").onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await store.changePin(code, document.getElementById("new-pin").value);
+      toast(t("pinChanged"));
+      go("/b/" + code);
+    } catch (err) {
+      console.error(err);
+      toast(t("saveFailed"));
+    }
+  };
+}
+
+// --- Your account (residents): add or change a password ---
+
+function showAccount() {
+  render(`
+    <div class="page-head">
+      <h1>${t("yourAccount")}</h1>
+      <a href="#/">${t("backToBoard")}</a>
+    </div>
+    <div class="card">
+      <div class="small muted">${esc(store.building.name)}</div>
+      <h2>${esc(user.name)} · ${esc(user.flat)}</h2>
+    </div>
+
+    <div class="section-title">${t("password")}</div>
+    <form class="card" id="password-form">
+      <p class="muted" style="margin-bottom:14px">${user.hasPassword ? t("hasPasswordText") : t("addPasswordText")}</p>
+      ${user.hasPassword ? `
+        <div class="field">
+          <label for="current-password">${t("currentPassword")}</label>
+          <input id="current-password" type="password" required maxlength="40" autocomplete="current-password">
+        </div>
+      ` : ""}
+      <div class="field">
+        <label for="new-password">${t("newPassword")}</label>
+        <input id="new-password" type="password" required minlength="4" maxlength="40" autocomplete="new-password">
+        <p class="hint">${t("passwordHint")}</p>
+      </div>
+      <p class="form-error" id="password-error" hidden></p>
+      <button class="btn btn-primary">${user.hasPassword ? t("changePassword") : t("addPassword")}</button>
+    </form>
+  `);
+
+  document.getElementById("password-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const errorBox = document.getElementById("password-error");
+    errorBox.hidden = true;
+    const current = document.getElementById("current-password")?.value || null;
+    const next = document.getElementById("new-password").value;
+    const member = user.member || memberId(user.name, user.flat);
+    try {
+      const ok = await store.setPassword(user.code, member, next, current);
+      if (!ok) {
+        errorBox.textContent = user.hasPassword ? t("wrongPassword") : t("passwordAlreadySet");
+        errorBox.hidden = false;
+        return;
+      }
+      user.member = member;
+      user.hasPassword = true;
+      saveUser();
+      toast(t("passwordSaved"));
+      go("/");
+    } catch (err) {
+      console.error(err);
+      toast(t("saveFailed"));
+    }
+  };
+}
+
 // --- Board (home screen) ---
 
 function showBoard(live = false) {
-  const all = data.complaints;
+  const all = data.complaints.filter((c) => !c.hidden); // hidden ones only show in the admin's "Hidden" filter
+  const hidden = data.complaints.filter((c) => c.hidden);
   const count = (s) => all.filter((c) => c.status === s).length;
   const fixTime = averageFixTime();
+  if (filter === "hidden" && (!user.isAdmin || !hidden.length)) filter = "all";
 
   // Unresolved first, then the ones with the most "me too", then newest
-  const shown = all
-    .filter((c) => filter === "all" || c.status === filter)
+  const shown = (filter === "hidden" ? hidden : all)
+    .filter((c) => filter === "all" || filter === "hidden" || c.status === filter)
     .sort((a, b) =>
       (a.status === "resolved") - (b.status === "resolved") ||
       b.meToo.length - a.meToo.length ||
@@ -616,9 +872,10 @@ function showBoard(live = false) {
     : [];
 
   const announcements = [...data.announcements].sort((a, b) => b.createdAt - a.createdAt);
-  const isEmpty = !all.length && !announcements.length; // a brand new building
+  const isEmpty = !data.complaints.length && !announcements.length; // a brand new building (hidden ones count)
 
   render(`
+    ${isSafePhoto(store.building.photo) ? `<img class="building-photo" src="${store.building.photo}" alt="${esc(store.building.name)}">` : ""}
     <div class="page-head">
       <div>
         <div class="small muted">${t("buildingBoard")}</div>
@@ -673,6 +930,7 @@ function showBoard(live = false) {
     <div class="chips" role="group" aria-label="${t("complaints")}">
       ${chip("all", t("all") + " (" + all.length + ")")}
       ${STATUSES.map((s) => chip(s, t("status." + s))).join("")}
+      ${user.isAdmin && hidden.length ? chip("hidden", t("hiddenChip", hidden.length)) : ""}
     </div>
     <div class="stack">
       ${shown.length ? shown.map(complaintCard).join("") : `<div class="card empty">${t("nothingHere")}</div>`}
@@ -779,6 +1037,7 @@ function complaintCard(c, i) {
           ${statusPill(c.status)}
         </div>
         <div class="complaint-meta">
+          ${c.hidden ? `<span class="pill pill-hidden">${t("hiddenLabel")}</span>` : ""}
           <span class="pill pill-cat">${t("cat." + c.category)}</span>
           ${overdueBadge(c)}
           <span>${esc(c.flat)}</span>
@@ -837,7 +1096,10 @@ function showResidents(live = false) {
               <tr>
                 <td>${esc(r.name)}</td>
                 <td>${esc(r.flat)}</td>
-                <td><button class="btn btn-small btn-danger" data-resident="${i}">${t("remove")}</button></td>
+                <td class="row-actions">
+                  ${canResetPasswords() ? `<button class="btn btn-small" data-reset="${i}">${t("resetPassword")}</button>` : ""}
+                  <button class="btn btn-small btn-danger" data-resident="${i}">${t("remove")}</button>
+                </td>
               </tr>
             `).join("")}
           </tbody>
@@ -880,6 +1142,21 @@ function showResidents(live = false) {
     e.target.value = "";
   };
 
+  // A resident forgot their password: remove it, so they can log in with name + flat and set a new one
+  app.querySelectorAll("[data-reset]").forEach((btn) => {
+    btn.onclick = async () => {
+      const r = residents[btn.dataset.reset];
+      if (!confirm(t("confirmResetPassword", r.name, r.flat))) return;
+      try {
+        await store.resetPassword(user.code, memberId(r.name, r.flat), user.session);
+        toast(t("passwordReset", r.name));
+      } catch (err) {
+        console.error(err);
+        toast(t("saveFailed"));
+      }
+    };
+  });
+
   // Keep the paste box open if it was open before a redraw
   const pasteArea = document.getElementById("add-paste");
   if (pasteArea.value) pasteArea.closest("details").open = true;
@@ -913,6 +1190,11 @@ function showResidents(live = false) {
     });
   };
   search.oninput();
+}
+
+// Only admins who logged in with the new private PIN have a session the database trusts
+function canResetPasswords() {
+  return Boolean(user.session) && user.session !== "old";
 }
 
 function isOnList(list, name, flat) {
@@ -1004,7 +1286,7 @@ function findSimilar(title, category) {
   const words = new Set(keywords(title));
   if (!words.size) return [];
   return data.complaints
-    .filter((c) => c.status !== "resolved")
+    .filter((c) => c.status !== "resolved" && !c.hidden)
     .map((c) => {
       const shared = keywords(c.title + " " + c.desc).filter((w) => words.has(w));
       const score = new Set(shared).size + (c.category === category ? 1 : 0);
@@ -1066,14 +1348,15 @@ function shareAnnouncementText(a) {
 
 // --- Optional photo, used on complaints and announcements ---
 
-function photoField() {
+function photoField(label = t("photo"), hint = "") {
   return `
     <div class="field">
-      <span class="label">${t("photo")}</span>
+      <span class="label">${label}</span>
       <label class="btn photo-pick" id="photo-pick">
         <input type="file" id="photo-input" accept="image/*" class="visually-hidden">
         ${t("addPhoto")}
       </label>
+      ${hint ? `<p class="hint">${hint}</p>` : ""}
       <div id="photo-preview"></div>
     </div>
   `;
@@ -1145,9 +1428,14 @@ function showComplaint(id, live = false) {
     render(`<div class="card empty">${t("complaintGone")} <a href="#/">${t("backToBoardLink")}</a></div>`, live);
     return;
   }
+  if (c.hidden && !user.isAdmin) {
+    render(`<div class="card empty">${t("complaintHidden")} <a href="#/">${t("backToBoardLink")}</a></div>`, live);
+    return;
+  }
 
   const mine = c.meToo.includes(userKey());
   const ownComplaint = c.author === user.name && c.flat === user.flat;
+  const editing = editingId === c.id && ownComplaint;
 
   render(`
     <div class="page-head">
@@ -1155,16 +1443,34 @@ function showComplaint(id, live = false) {
       ${statusPill(c.status)}
     </div>
 
+    ${c.hidden ? `<p class="form-error">${t("hiddenNotice")}</p>` : ""}
+
     <div class="card">
-      <h1>${esc(c.title)}</h1>
+      ${editing ? `
+        <form id="edit-form">
+          <div class="field">
+            <label for="edit-title">${t("whatProblem")}</label>
+            <input id="edit-title" required maxlength="80" value="${esc(c.title)}">
+          </div>
+          <div class="field">
+            <label for="edit-desc">${t("details")}</label>
+            <textarea id="edit-desc" maxlength="500">${esc(c.desc)}</textarea>
+          </div>
+          <div class="actions" style="margin-top:0">
+            <button class="btn btn-primary">${t("save")}</button>
+            <button type="button" class="btn" id="edit-cancel">${t("cancel")}</button>
+          </div>
+        </form>
+      ` : `<h1>${esc(c.title)}</h1>`}
       <div class="complaint-meta">
         <span class="pill pill-cat">${t("cat." + c.category)}</span>
         ${overdueBadge(c)}
         <span>${esc(t("byAuthor", c.author, c.flat))}</span>
         <span>·</span>
         <span>${timeAgo(c.createdAt)}</span>
+        ${c.editedAt ? `<span>·</span><span>${t("edited")}</span>` : ""}
       </div>
-      ${c.desc ? `<p style="margin-top:14px">${esc(c.desc)}</p>` : ""}
+      ${c.desc && !editing ? `<p style="margin-top:14px">${esc(c.desc)}</p>` : ""}
       ${isSafePhoto(c.photo) ? `
         <button class="photo-full" id="photo-open" aria-label="${t("photoAlt")}">
           <img src="${c.photo}" alt="${t("photoAlt")}">
@@ -1178,6 +1484,7 @@ function showComplaint(id, live = false) {
           </button>
         `}
         <a class="btn btn-whatsapp" href="${whatsappLink(shareComplaintText(c))}" target="_blank" rel="noopener">${t("shareWhatsApp")}</a>
+        ${ownComplaint && !editing ? `<button class="btn" id="edit-btn">${t("edit")}</button>` : ""}
       </div>
       ${ownComplaint && c.meToo.length ? `<p class="small muted" style="margin-top:14px">${t("othersHaveIt", c.meToo.length)}</p>` : ""}
     </div>
@@ -1216,6 +1523,40 @@ function showComplaint(id, live = false) {
     e.preventDefault();
     postUpdate(c);
   };
+
+  // Admin: hide spam or jokes from the board (or bring them back)
+  const hideBtn = document.getElementById("hide-btn");
+  if (hideBtn) hideBtn.onclick = () => {
+    if (!c.hidden && !confirm(t("confirmHide"))) return;
+    store.updateComplaint(c, { hidden: !c.hidden });
+    toast(c.hidden ? t("complaintUnhidden") : t("complaintHiddenToast"));
+  };
+
+  // The person who posted it can fix the title or details
+  const editBtn = document.getElementById("edit-btn");
+  if (editBtn) editBtn.onclick = () => {
+    editingId = c.id;
+    showComplaint(c.id, true);
+    document.getElementById("edit-title").focus();
+  };
+  const editForm = document.getElementById("edit-form");
+  if (editForm) {
+    document.getElementById("edit-cancel").onclick = () => {
+      editingId = null;
+      showComplaint(c.id, true);
+    };
+    editForm.onsubmit = (e) => {
+      e.preventDefault();
+      const title = document.getElementById("edit-title").value.trim();
+      const desc = document.getElementById("edit-desc").value.trim();
+      editingId = null;
+      // clear the boxes first, so the page is allowed to redraw with the new text
+      document.getElementById("edit-title").value = "";
+      document.getElementById("edit-desc").value = "";
+      store.updateComplaint(c, { title, desc, editedAt: Date.now() });
+      toast(t("complaintSaved"));
+    };
+  }
 }
 
 function adminControls(c) {
@@ -1234,6 +1575,10 @@ function adminControls(c) {
       </div>
       <button class="btn btn-primary">${t("postUpdate")}</button>
     </form>
+    <div class="admin-hide">
+      <button class="btn btn-small ${c.hidden ? "" : "btn-danger"}" id="hide-btn">${c.hidden ? t("unhide") : t("hideFromBoard")}</button>
+      <span class="hint">${c.hidden ? "" : t("hideHint")}</span>
+    </div>
   `;
 }
 

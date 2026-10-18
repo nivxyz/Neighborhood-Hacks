@@ -2,8 +2,7 @@ rules_version = '2';
 
 // Who can read and write FlatDesk's data.
 // Each building lives at buildings/{code}. You can open a building only if you
-// know its code: nobody can list all buildings. Hackathon demo, so there are no
-// accounts yet; anyone with the code can use that building's board.
+// know its code: nobody can list all buildings.
 service cloud.firestore {
   match /databases/{database}/documents {
     match /buildings/{code} {
@@ -19,6 +18,25 @@ service cloud.firestore {
                     && request.resource.data.residents.size() <= 5000;
       allow delete: if false;
 
+      function here() {
+        return /databases/$(database)/documents/buildings/$(code);
+      }
+      function secretOf(member) {
+        return /databases/$(database)/documents/buildings/$(code)/secrets/$(member);
+      }
+      // Logging in without a password only works if that resident never set one
+      function residentProofOk(member, proof) {
+        return member is string && (
+          (proof == null && (!exists(secretOf(member)) || get(secretOf(member)).data.passHash == null))
+          || (proof is string && exists(secretOf(member)) && get(secretOf(member)).data.passHash == proof)
+        );
+      }
+      function isAdminSession(session) {
+        return session is string
+          && exists(/databases/$(database)/documents/buildings/$(code)/sessions/$(session))
+          && get(/databases/$(database)/documents/buildings/$(code)/sessions/$(session)).data.role == 'admin';
+      }
+
       match /complaints/{id} {
         allow read, create, update: if true;
         allow delete: if false;
@@ -26,6 +44,36 @@ service cloud.firestore {
       match /announcements/{id} {
         allow read, create, delete: if true;
         allow update: if false;
+      }
+
+      // Admin PIN and recovery email. Made together with the building, then only
+      // readable/changeable by someone signed in with that recovery email.
+      match /private/{doc} {
+        allow create: if doc == 'admin' && !exists(here()) && existsAfter(here());
+        allow read: if request.auth != null && request.auth.token.email == resource.data.email;
+        allow update: if request.auth != null && request.auth.token.email == resource.data.email
+                      && request.resource.data.email == resource.data.email;
+        allow delete: if false;
+      }
+
+      // Residents' password hashes. Nobody can read them.
+      match /secrets/{member} {
+        allow read, delete: if false;
+        allow create: if request.resource.data.passHash is string;
+        // Change it if you know the current one, set it if there's none, or an admin clears it
+        allow update: if resource.data.passHash == null
+                      || request.resource.data.oldProof == resource.data.passHash
+                      || isAdminSession(request.resource.data.get('adminSession', null));
+      }
+
+      // A session is accepted only if its proof matches the PIN or password, so an accepted
+      // session means the person typed it correctly. Nobody can read sessions.
+      match /sessions/{id} {
+        allow create: if (request.resource.data.role == 'admin'
+                          && request.resource.data.proof == get(/databases/$(database)/documents/buildings/$(code)/private/admin).data.pinHash)
+                      || (request.resource.data.role == 'resident'
+                          && residentProofOk(request.resource.data.member, request.resource.data.proof));
+        allow read, update, delete: if false;
       }
     }
   }

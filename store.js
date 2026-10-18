@@ -1,8 +1,12 @@
 // Where FlatDesk keeps its data.
 // Each apartment building gets its own space, found by its building code:
-//   buildings/{code}                  name, admin, residents list
+//   buildings/{code}                  name, photo, residents list
 //   buildings/{code}/complaints/...   that building's complaints
 //   buildings/{code}/announcements/...
+//   buildings/{code}/private/admin    admin PIN and recovery email (nobody can read it,
+//                                     except the admin after signing in with that email)
+//   buildings/{code}/secrets/...      residents' password hashes (nobody can read them)
+//   buildings/{code}/sessions/...     proof someone typed the right PIN or password
 // If firebase-config.js is filled in, everything is saved in Firebase (Cloud Firestore),
 // so every phone sees the same board and changes show up live.
 // If not, it falls back to saving in this browser only, which is handy for testing.
@@ -11,7 +15,7 @@ import { firebaseConfig } from "./firebase-config.js";
 
 const SDK = "https://www.gstatic.com/firebasejs/10.12.2";
 const LOCAL_KEY = "flatdesk-local";
-export const DEMO_CODE = "DEMO";
+export const DEMO_PIN = "1234";
 
 export const data = { complaints: [], announcements: [] };
 export const usingFirebase = Boolean(firebaseConfig.projectId);
@@ -22,8 +26,10 @@ let onChange = () => {};
 let onError = () => {};
 let fb; // Firestore functions, loaded only when Firebase is used
 let db;
+let app;
+let fbAuth; // Firebase Authentication, loaded only for the recovery email
 let stopListening = [];
-let localDb; // browser-only mode: { buildings: { CODE: { info, complaints, announcements } } }
+let localDb; // browser-only mode: { buildings: { CODE: { info, private, secrets, complaints, announcements } } }
 
 export async function startStore(handlers) {
   onChange = handlers.onChange;
@@ -31,7 +37,8 @@ export async function startStore(handlers) {
   if (usingFirebase) {
     const { initializeApp } = await import(`${SDK}/firebase-app.js`);
     fb = await import(`${SDK}/firebase-firestore.js`);
-    db = fb.getFirestore(initializeApp(firebaseConfig));
+    app = initializeApp(firebaseConfig);
+    db = fb.getFirestore(app);
   } else {
     try {
       localDb = JSON.parse(localStorage.getItem(LOCAL_KEY));
@@ -48,54 +55,49 @@ export async function getBuilding(code) {
   return snap.exists() ? snap.data() : null;
 }
 
-// Makes a new building with a random code. The admin PIN is stored scrambled (hashed), never as-is.
-export async function createBuilding(info, pin) {
+// Makes a new building with a random code. The PIN and recovery email go in a private
+// document next to it. Also sets up the recovery email with Firebase, so "Forgot PIN?" works.
+export async function createBuilding(info, pin, email) {
+  await setUpRecoveryEmail(email);
+  return saveNewBuilding(info, pin, email, {});
+}
+
+// Every visitor who taps "Try the demo" gets their own copy, so nobody sees anyone else's test posts
+export async function createDemo() {
+  const info = { name: "Demo Apartments", open: true, demo: true, residents: [], createdAt: Date.now() };
+  return saveNewBuilding(info, DEMO_PIN, null, sampleData());
+}
+
+async function saveNewBuilding(info, pin, email, extra) {
   for (let tries = 0; tries < 5; tries++) {
     const code = randomCode();
-    const newBuilding = { ...info, code, pinHash: await hashPin(code, pin) };
+    const newBuilding = { ...info, code };
+    const secret = { email, pin, pinHash: await hashPin(code, pin) };
 
     if (!usingFirebase) {
       if (localDb.buildings[code]) continue;
-      localDb.buildings[code] = { info: newBuilding, complaints: [], announcements: [] };
-      saveLocal();
+      localDb.buildings[code] = {
+        info: newBuilding, private: secret, secrets: {},
+        complaints: extra.complaints || [], announcements: extra.announcements || [],
+      };
+      saveLocal(false);
       return newBuilding;
     }
     try {
       // The rules only allow creating a building that doesn't exist yet,
       // so if this code is already taken, it's refused and we try another one.
-      await fb.setDoc(fb.doc(db, "buildings", code), newBuilding);
+      const batch = fb.writeBatch(db);
+      batch.set(fb.doc(db, "buildings", code), newBuilding);
+      batch.set(fb.doc(db, "buildings", code, "private", "admin"), secret);
+      (extra.complaints || []).forEach((c) => batch.set(ref("complaints", c.id, code), c));
+      (extra.announcements || []).forEach((a) => batch.set(ref("announcements", a.id, code), a));
+      await batch.commit();
       return newBuilding;
     } catch (err) {
       if (err.code !== "permission-denied") throw err;
     }
   }
   throw new Error("Couldn't create the building. Please try again.");
-}
-
-// The demo building judges can try without uploading a sheet. Made once, with example data.
-export async function ensureDemo() {
-  if (await getBuilding(DEMO_CODE)) return;
-  const info = {
-    code: DEMO_CODE,
-    name: "Demo Apartments",
-    adminName: "Demo admin",
-    adminFlat: "A-001",
-    open: true, // anyone can join, no residents list check
-    residents: [],
-    pinHash: await hashPin(DEMO_CODE, "1234"),
-    createdAt: Date.now(),
-  };
-  const sample = sampleData();
-
-  if (!usingFirebase) {
-    localDb.buildings[DEMO_CODE] = { info, ...sample };
-    return saveLocal(false);
-  }
-  const batch = fb.writeBatch(db);
-  batch.set(fb.doc(db, "buildings", DEMO_CODE), info);
-  sample.complaints.forEach((c) => batch.set(ref("complaints", c.id, DEMO_CODE), c));
-  sample.announcements.forEach((a) => batch.set(ref("announcements", a.id, DEMO_CODE), a));
-  await batch.commit();
 }
 
 // Loads one building's info, complaints and announcements, and keeps them up to date.
@@ -137,6 +139,145 @@ export async function hashPin(code, pin) {
   return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+function passwordHash(code, member, password) {
+  return hashPin(code, "password:" + member + ":" + password);
+}
+
+// ---------- Logging in ----------
+// The PIN and passwords can't be read by anyone, so instead of checking them here,
+// we write a "session" with the scrambled PIN/password. The database rules only accept it
+// if it matches, so an accepted session means it was right.
+
+// Returns a session id if the PIN is right, or null if it's wrong
+export async function adminLogin(b, pin) {
+  const proof = await hashPin(b.code, pin);
+  if (b.pinHash) return proof === b.pinHash ? "old" : null; // buildings made before the PIN went private
+
+  if (!usingFirebase) return localDb.buildings[b.code].private.pinHash === proof ? "local" : null;
+  const session = randomId();
+  try {
+    await fb.setDoc(fb.doc(db, "buildings", b.code, "sessions", session), { role: "admin", proof, at: Date.now() });
+    return session;
+  } catch (err) {
+    if (err.code === "permission-denied") return null;
+    throw err;
+  }
+}
+
+// Returns "ok", "needPassword" (this resident has a password and none was given) or "wrong"
+export async function residentLogin(code, member, password) {
+  const proof = password ? await passwordHash(code, member, password) : null;
+
+  if (!usingFirebase) {
+    const saved = localDb.buildings[code].secrets?.[member] || null;
+    if (!saved) return "ok";
+    if (!proof) return "needPassword";
+    return saved === proof ? "ok" : "wrong";
+  }
+  try {
+    await fb.setDoc(fb.doc(db, "buildings", code, "sessions", randomId()), { role: "resident", member, proof, at: Date.now() });
+    return "ok";
+  } catch (err) {
+    if (err.code === "permission-denied") return proof ? "wrong" : "needPassword";
+    throw err;
+  }
+}
+
+// Add or change a resident's password. Returns false if the current password was wrong.
+export async function setPassword(code, member, newPassword, currentPassword) {
+  const passHash = await passwordHash(code, member, newPassword);
+  const oldProof = currentPassword ? await passwordHash(code, member, currentPassword) : null;
+
+  if (!usingFirebase) {
+    const b = localDb.buildings[code];
+    b.secrets = b.secrets || {};
+    if (b.secrets[member] && b.secrets[member] !== oldProof) return false;
+    b.secrets[member] = passHash;
+    saveLocal(false);
+    return true;
+  }
+  try {
+    await fb.setDoc(fb.doc(db, "buildings", code, "secrets", member), { passHash, oldProof });
+    return true;
+  } catch (err) {
+    if (err.code === "permission-denied") return false;
+    throw err;
+  }
+}
+
+// Admin removes a resident's password (they forgot it). Needs the admin's session.
+export async function resetPassword(code, member, adminSession) {
+  if (!usingFirebase) {
+    delete localDb.buildings[code].secrets?.[member];
+    return saveLocal(false);
+  }
+  await fb.setDoc(fb.doc(db, "buildings", code, "secrets", member), { passHash: null, oldProof: null, adminSession });
+}
+
+// ---------- Recovery email (forgot PIN) ----------
+// Firebase Authentication sends the emails. At registration we make an account for the
+// recovery email with a random password nobody knows. "Forgot PIN?" emails a link to set
+// a new password for it; signing in with that lets the admin read and change the PIN.
+
+async function auth() {
+  if (!fbAuth) {
+    const mod = await import(`${SDK}/firebase-auth.js`);
+    fbAuth = { ...mod, instance: mod.getAuth(app) };
+  }
+  return fbAuth;
+}
+
+async function setUpRecoveryEmail(email) {
+  if (!usingFirebase) return;
+  const a = await auth();
+  try {
+    await a.createUserWithEmailAndPassword(a.instance, email, randomId() + randomId());
+  } catch (err) {
+    if (err.code !== "auth/email-already-in-use") throw err; // already set up (e.g. admin of two buildings)
+  }
+  await a.signOut(a.instance);
+}
+
+export async function sendRecoveryEmail(email) {
+  if (!usingFirebase) return;
+  const a = await auth();
+  await a.sendPasswordResetEmail(a.instance, email);
+}
+
+// Signs in with the recovery email and returns the current PIN.
+// Throws "wrongLogin" or "notThisBuilding".
+export async function recoverySignIn(code, email, password) {
+  if (!usingFirebase) {
+    const secret = localDb.buildings[code]?.private;
+    if (!secret || secret.email !== email) throw new Error("notThisBuilding");
+    return secret.pin;
+  }
+  const a = await auth();
+  try {
+    await a.signInWithEmailAndPassword(a.instance, email, password);
+  } catch (err) {
+    throw new Error("wrongLogin");
+  }
+  try {
+    const snap = await fb.getDoc(fb.doc(db, "buildings", code, "private", "admin"));
+    return snap.data().pin;
+  } catch (err) {
+    await a.signOut(a.instance);
+    throw new Error("notThisBuilding");
+  }
+}
+
+export async function changePin(code, pin) {
+  const pinHash = await hashPin(code, pin);
+  if (!usingFirebase) {
+    Object.assign(localDb.buildings[code].private, { pin, pinHash });
+    return saveLocal(false);
+  }
+  await fb.updateDoc(fb.doc(db, "buildings", code, "private", "admin"), { pin, pinHash });
+  const a = await auth();
+  await a.signOut(a.instance);
+}
+
 // ---------- Changing data ----------
 // Every change goes through one of these. When the data changes, onChange() redraws the screen.
 
@@ -171,6 +312,15 @@ export function addUpdate(complaint, update) {
     updates: fb.arrayUnion(update),
     status: update.status,
   }));
+}
+
+// Edit a complaint, or hide it from the board (admin)
+export function updateComplaint(complaint, fields) {
+  if (!usingFirebase) {
+    Object.assign(complaint, fields);
+    return saveLocal();
+  }
+  send(fb.updateDoc(ref("complaints", complaint.id), fields));
 }
 
 export function addAnnouncement(announcement) {
@@ -273,6 +423,11 @@ function saveLocal(notify = true) {
     localStorage.setItem(LOCAL_KEY, JSON.stringify(localDb));
   } catch (e) {}
   if (notify) onChange();
+}
+
+// A long random id that can't be guessed
+function randomId() {
+  return [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(36).padStart(2, "0")).join("");
 }
 
 // 6 characters, without ones that are easy to mix up (0/O, 1/I)
