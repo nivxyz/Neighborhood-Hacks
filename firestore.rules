@@ -1,0 +1,17 @@
+rules_version = '2';
+
+// Who can read and write FlatDesk's data.
+// Hackathon demo: anyone with the link can use the board, but only these two
+// collections, and nobody can delete complaints.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /complaints/{id} {
+      allow read, create, update: if true;
+      allow delete: if false;
+    }
+    match /announcements/{id} {
+      allow read, create, delete: if true;
+      allow update: if false;
+    }
+  }
+}

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FlatDesk</title>
+  <meta name="description" content="Complaint tracker and announcement board for apartment buildings.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a href="#/" class="brand">
+      <span class="brand-mark" aria-hidden="true">F</span>
+      FlatDesk
+    </a>
+    <div id="who" class="who"></div>
+  </header>
+
+  <!-- Each screen is drawn into here by app.js -->
+  <main id="app" class="container"><p class="empty">Loading…</p></main>
+
+  <!-- Pop-up messages like "Complaint posted" -->
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
