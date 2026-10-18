@@ -668,6 +668,71 @@ input[type="file"]::file-selector-button {
   font-weight: 500;
 }
 
+/* ---------- Forgot PIN: numbered steps ---------- */
+.recover-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.recover-step { display: flex; gap: 14px; align-items: flex-start; opacity: .6; transition: opacity .25s ease, border-color .25s ease; }
+.recover-step.active { opacity: 1; border-color: var(--brand); }
+.recover-step.done { opacity: 1; }
+.recover-step h2 { font-size: 16px; margin-bottom: 4px; }
+.rstep-body { flex: 1; min-width: 0; }
+.rstep-num {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--line);
+  color: var(--text);
+  font-weight: 700;
+}
+.recover-step.active .rstep-num { background: var(--brand); color: #fff; }
+.recover-step.done .rstep-num { background: var(--resolved); color: #fff; font-size: 0; }
+.recover-step.done .rstep-num::after { content: "✓"; font-size: 15px; }
+
+/* A small drawing of Firebase's "new password" page */
+.mock-page {
+  margin-top: 12px;
+  max-width: 300px;
+  padding: 14px;
+  border-radius: 10px;
+  background: #fff;
+  color: #202124;
+  font-family: Roboto, Arial, sans-serif;
+  box-shadow: var(--shadow);
+}
+.mock-title { font-size: 16px; font-weight: 500; }
+.mock-small { font-size: 12px; color: #5f6368; margin-bottom: 10px; }
+.mock-label { font-size: 11px; color: #1a73e8; }
+.mock-input {
+  position: relative;
+  padding: 4px 0;
+  border-bottom: 2px solid #1a73e8;
+  letter-spacing: .2em;
+}
+.mock-arrow {
+  position: absolute;
+  right: 0;
+  top: 2px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #fde8e7;
+  color: #d92d20;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: normal;
+}
+.mock-btn {
+  display: inline-block;
+  margin-top: 12px;
+  padding: 6px 14px;
+  border-radius: 4px;
+  background: #1a73e8;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+}
+
 /* ---------- Hiding complaints ---------- */
 .pill-hidden { background: var(--line); color: var(--muted); }
 .admin-hide { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }

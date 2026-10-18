@@ -126,6 +126,11 @@ function inviteLink(code) {
   return pageLink("/b/" + code);
 }
 
+// The join page with "I'm the building admin" already ticked
+function adminLoginLink(code) {
+  return location.origin + location.pathname + "?admin=1#/b/" + code;
+}
+
 function whatsappLink(text) {
   return "https://wa.me/?text=" + encodeURIComponent(text);
 }
@@ -651,6 +656,13 @@ async function showJoin(code, after) {
     pinInput.required = adminBox.checked;
   };
 
+  // Came from "Log in with your new PIN": tick the admin box for them
+  if (new URLSearchParams(location.search).has("admin")) {
+    history.replaceState(null, "", location.pathname + location.hash); // only once
+    adminBox.checked = true;
+    adminBox.onchange();
+  }
+
   const showError = (message) => {
     errorBox.textContent = message;
     errorBox.hidden = false;
@@ -738,6 +750,8 @@ async function showRecover(code) {
     return;
   }
 
+  const loginLink = adminLoginLink(code);
+
   render(`
     <div class="page-head">
       <div>
@@ -746,45 +760,88 @@ async function showRecover(code) {
       </div>
       <a href="#/b/${esc(code)}">${t("cancel")}</a>
     </div>
+    <p class="muted" style="margin:-8px 0 18px">${t("recoverIntro")}</p>
 
-    <div class="section-title" style="margin-top:0">${t("recoverStep1")}</div>
-    <form class="card" id="send-form">
-      <p class="muted" style="margin-bottom:14px">${t("recoverStep1Text")}</p>
-      <div class="field">
-        <label for="rec-email">${t("recoveryEmail")}</label>
-        <input id="rec-email" required type="email" autocomplete="email">
-      </div>
-      <p class="form-ok" id="send-ok" hidden>${t("recoverySent")}</p>
-      <button class="btn btn-primary">${t("sendLink")}</button>
-    </form>
+    <ol class="recover-steps">
+      <li class="card recover-step active" id="rstep-1">
+        <span class="rstep-num">1</span>
+        <div class="rstep-body">
+          <h2>${t("rStep1Title")}</h2>
+          <p class="muted">${t("rStep1Text")}</p>
+          <form id="send-form" class="code-row" style="margin-top:12px">
+            <input id="rec-email" required type="email" autocomplete="email" placeholder="name@example.com" aria-label="${t("recoveryEmail")}">
+            <button class="btn btn-primary">${t("sendLink")}</button>
+          </form>
+          <p class="form-ok" id="send-ok" hidden>${t("recoverySentShort")}</p>
+        </div>
+      </li>
 
-    <div class="section-title">${t("recoverStep2")}</div>
-    <form class="card" id="signin-form">
-      <p class="muted" style="margin-bottom:14px">${t("recoverStep2Text")}</p>
-      <div class="field">
-        <label for="rec-email2">${t("recoveryEmail")}</label>
-        <input id="rec-email2" required type="email" autocomplete="email">
-      </div>
-      <div class="field">
-        <label for="rec-pin">${t("newPinFromEmail")}</label>
-        <input id="rec-pin" required type="password" inputmode="numeric" autocomplete="new-password" maxlength="12">
-      </div>
-      <p class="form-error" id="signin-error" hidden></p>
-      <button class="btn btn-primary">${t("saveNewPin")}</button>
-    </form>
+      <li class="card recover-step" id="rstep-2">
+        <span class="rstep-num">2</span>
+        <div class="rstep-body">
+          <h2>${t("rStep2Title")}</h2>
+          <p class="muted">${t("rStep2Text", store.emailSender)}</p>
+        </div>
+      </li>
+
+      <li class="card recover-step" id="rstep-3">
+        <span class="rstep-num">3</span>
+        <div class="rstep-body">
+          <h2>${t("rStep3Title")}</h2>
+          <p class="muted">${t("rStep3Text")}</p>
+          <!-- A small picture of Firebase's page, so it's clear where the PIN goes -->
+          <div class="mock-page" aria-hidden="true">
+            <div class="mock-title">Reset your password</div>
+            <div class="mock-small">for your email</div>
+            <div class="mock-label">New password</div>
+            <div class="mock-input">••••••<span class="mock-arrow">← ${t("mockYourPin")}</span></div>
+            <div class="mock-btn">SAVE</div>
+          </div>
+        </div>
+      </li>
+
+      <li class="card recover-step" id="rstep-4">
+        <span class="rstep-num">4</span>
+        <div class="rstep-body">
+          <h2>${t("rStep4Title")}</h2>
+          <p class="muted">${t("rStep4Text")}</p>
+          <a class="btn btn-primary" href="${esc(loginLink)}" style="margin-top:12px">${t("goToAdminLogin")}</a>
+        </div>
+      </li>
+    </ol>
+
+    <details class="paste-box" style="margin-top:20px">
+      <summary>${t("otherDeviceTitle")}</summary>
+      <form class="card" id="signin-form" style="margin-top:10px">
+        <p class="muted" style="margin-bottom:14px">${t("otherDeviceText")}</p>
+        <div class="field">
+          <label for="rec-email2">${t("recoveryEmail")}</label>
+          <input id="rec-email2" required type="email" autocomplete="email">
+        </div>
+        <div class="field">
+          <label for="rec-pin">${t("newPinFromEmail")}</label>
+          <input id="rec-pin" required type="password" inputmode="numeric" autocomplete="new-password" maxlength="12">
+        </div>
+        <p class="form-error" id="signin-error" hidden></p>
+        <button class="btn btn-primary">${t("saveNewPin")}</button>
+      </form>
+    </details>
   `);
 
   document.getElementById("send-form").onsubmit = async (e) => {
     e.preventDefault();
     const email = document.getElementById("rec-email").value.trim().toLowerCase();
     try {
-      await store.sendRecoveryEmail(email, inviteLink(code));
+      await store.sendRecoveryEmail(email, loginLink);
       rememberRecoveryEmail(code, email);
     } catch (err) {
       console.error(err); // don't say whether the email exists; just show the same message
     }
     document.getElementById("send-ok").hidden = false;
     document.getElementById("rec-email2").value = email;
+    // Step 1 done: highlight what to do next
+    document.getElementById("rstep-1").classList.replace("active", "done");
+    ["rstep-2", "rstep-3", "rstep-4"].forEach((id) => document.getElementById(id).classList.add("active"));
   };
 
   document.getElementById("signin-form").onsubmit = async (e) => {

@@ -16,6 +16,8 @@ import { firebaseConfig } from "./firebase-config.js";
 const SDK = "https://www.gstatic.com/firebasejs/10.12.2";
 const LOCAL_KEY = "flatdesk-local";
 export const DEMO_PIN = "123456";
+// Who Firebase's recovery emails come from, so admins know what to look for
+export const emailSender = "noreply@" + (firebaseConfig.authDomain || "firebaseapp.com");
 
 export const data = { complaints: [], announcements: [] };
 export const usingFirebase = Boolean(firebaseConfig.projectId);
