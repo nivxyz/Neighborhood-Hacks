@@ -238,10 +238,17 @@ async function setUpRecoveryEmail(email) {
   await a.signOut(a.instance);
 }
 
-export async function sendRecoveryEmail(email) {
+// returnTo: a FlatDesk link for the "Continue" button on the email's page. That only works if
+// this website is in Firebase's authorized domains, so if Firebase refuses it, send without it.
+export async function sendRecoveryEmail(email, returnTo) {
   if (!usingFirebase) return;
   const a = await auth();
-  await a.sendPasswordResetEmail(a.instance, email);
+  try {
+    await a.sendPasswordResetEmail(a.instance, email, { url: returnTo });
+  } catch (err) {
+    if (!String(err.code).includes("continue-uri")) throw err;
+    await a.sendPasswordResetEmail(a.instance, email);
+  }
 }
 
 // The new PIN the admin typed on the email's "new password" page becomes the building's PIN.

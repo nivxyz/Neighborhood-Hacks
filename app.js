@@ -467,6 +467,7 @@ function showRegister() {
         email
       );
       const session = await store.adminLogin(b, pin);
+      rememberRecoveryEmail(b.code, email);
       user = { code: b.code, buildingName: b.name, name: adminName, flat: adminFlat, isAdmin: true, session };
       saveUser();
       showRegistered(b);
@@ -549,6 +550,26 @@ function bindInviteBox(b) {
 
 // --- Join a building (resident or admin) ---
 
+// This device remembers the admin's recovery email for each building it registered or recovered,
+// so a PIN changed from the recovery email works at the normal admin login straight away
+const RECOVERY_KEY = "flatdesk-recovery";
+
+function rememberedRecoveryEmail(code) {
+  try {
+    return (JSON.parse(localStorage.getItem(RECOVERY_KEY)) || {})[code] || "";
+  } catch (e) {
+    return "";
+  }
+}
+
+function rememberRecoveryEmail(code, email) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(RECOVERY_KEY)) || {};
+    saved[code] = email;
+    localStorage.setItem(RECOVERY_KEY, JSON.stringify(saved));
+  } catch (e) {}
+}
+
 // Which resident this is, for passwords: their flat + the name on the list
 function memberId(name, flat) {
   return flatKey(flat) + "_" + nameKey(name).replace(/\s+/g, "-");
@@ -607,6 +628,11 @@ async function showJoin(code, after) {
         <input id="pin" type="password" inputmode="numeric" maxlength="12">
         ${b.open ? "" : `<p class="hint"><a href="#/recover/${esc(b.code)}">${t("forgotPin")}</a></p>`}
       </div>
+      <div class="field" id="rec-field" hidden>
+        <label for="rec-email-login">${t("recoveryEmail")}</label>
+        <input id="rec-email-login" type="email" autocomplete="email">
+        <p class="hint">${t("changedPinByEmailHint")}</p>
+      </div>
       <p class="form-error" id="join-error" hidden></p>
       <button class="btn btn-primary" id="join-btn" style="width:100%">${t("continue")}</button>
       ${b.open ? `<p class="demo-note">${t("demoNote")}</p>` : ""}
@@ -643,7 +669,26 @@ async function showJoin(code, after) {
     joinBtn.disabled = true;
     try {
       if (isAdmin) {
-        session = await store.adminLogin(b, pinInput.value);
+        const pin = pinInput.value;
+        session = await store.adminLogin(b, pin);
+        if (!session && !b.open && !b.pinHash) {
+          // Maybe they just set this PIN on the recovery email's page: finish that now
+          const recField = document.getElementById("rec-field");
+          const email = document.getElementById("rec-email-login").value.trim().toLowerCase() || rememberedRecoveryEmail(b.code);
+          if (email && PIN_PATTERN.test(pin)) {
+            try {
+              await store.recoverPin(b.code, email, pin);
+              session = await store.adminLogin(b, pin);
+              rememberRecoveryEmail(b.code, email);
+            } catch (err) {
+              console.error(err);
+            }
+          }
+          if (!session && recField.hidden) {
+            recField.hidden = false; // ask for the recovery email next time
+            return showError(t("wrongPinOrEmail"));
+          }
+        }
         if (!session) return showError(t("wrongPin"));
       } else {
         let listedName = name;
@@ -733,7 +778,8 @@ async function showRecover(code) {
     e.preventDefault();
     const email = document.getElementById("rec-email").value.trim().toLowerCase();
     try {
-      await store.sendRecoveryEmail(email);
+      await store.sendRecoveryEmail(email, inviteLink(code));
+      rememberRecoveryEmail(code, email);
     } catch (err) {
       console.error(err); // don't say whether the email exists; just show the same message
     }
@@ -755,6 +801,7 @@ async function showRecover(code) {
     if (!PIN_PATTERN.test(pin)) return showError("pinMustBeDigits");
     try {
       await store.recoverPin(code, email, pin);
+      rememberRecoveryEmail(code, email);
       // PIN saved: log them straight in as admin
       const session = await store.adminLogin(b, pin);
       user = { code: b.code, buildingName: b.name, name: b.adminName || t("admin"), flat: b.adminFlat || "", isAdmin: true, session };
