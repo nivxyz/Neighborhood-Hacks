@@ -1,17 +1,28 @@
 rules_version = '2';
 
 // Who can read and write FlatDesk's data.
-// Hackathon demo: anyone with the link can use the board, but only these two
-// collections, and nobody can delete complaints.
+// Each building lives at buildings/{code}. You can open a building only if you
+// know its code: nobody can list all buildings. Hackathon demo, so there are no
+// accounts yet; anyone with the code can use that building's board.
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /complaints/{id} {
-      allow read, create, update: if true;
-      allow delete: if false;
-    }
-    match /announcements/{id} {
-      allow read, create, delete: if true;
-      allow update: if false;
+    match /buildings/{code} {
+      allow get: if true;
+      allow list: if false;
+      // Only brand new buildings, with a sensible size. Nobody can change or delete one.
+      allow create: if request.resource.data.code == code
+                    && request.resource.data.residents is list
+                    && request.resource.data.residents.size() <= 5000;
+      allow update, delete: if false;
+
+      match /complaints/{id} {
+        allow read, create, update: if true;
+        allow delete: if false;
+      }
+      match /announcements/{id} {
+        allow read, create, delete: if true;
+        allow update: if false;
+      }
     }
   }
 }
