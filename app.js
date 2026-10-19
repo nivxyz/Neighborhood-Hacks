@@ -302,6 +302,11 @@ function showLanding() {
         <a class="btn btn-primary btn-big" href="#/register">${t("registerApartment")}</a>
         <button class="btn btn-big" id="try-demo">${t("tryDemo")}</button>
       </div>
+      ${showInstallButton() ? `
+        <button class="btn install-btn" id="install-btn">
+          <img src="assets/icon.svg" alt="" width="22" height="22"> ${t("installApp")}
+        </button>
+      ` : ""}
     </section>
 
     <form class="card code-card" id="code-form">
@@ -329,6 +334,9 @@ function showLanding() {
     e.preventDefault();
     go("/b/" + document.getElementById("code").value.trim().toUpperCase());
   };
+
+  const installBtn = document.getElementById("install-btn");
+  if (installBtn) installBtn.onclick = installApp;
 
   document.getElementById("try-demo").onclick = async (e) => {
     e.target.disabled = true;
@@ -1723,6 +1731,70 @@ function showNewAnnouncement() {
     toast(t("announcementPosted"));
     go("/");
   };
+}
+
+// ---------- Install as an app (phones only) ----------
+
+const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+const isPhone = isIOS || /Android/i.test(navigator.userAgent);
+let installPrompt = null; // Android Chrome gives us this so our button can open its install pop-up
+
+function isInstalled() {
+  return matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+}
+
+function showInstallButton() {
+  return isPhone && !isInstalled();
+}
+
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault(); // we show our own button instead of Chrome's mini banner
+  installPrompt = e;
+});
+
+window.addEventListener("appinstalled", () => {
+  installPrompt = null;
+  toast(t("installed"));
+  document.getElementById("install-btn")?.remove();
+});
+
+async function installApp() {
+  if (installPrompt) {
+    installPrompt.prompt(); // Android: the phone's own "Install app?" pop-up
+    await installPrompt.userChoice;
+    installPrompt = null;
+    return;
+  }
+  showInstallSteps(); // iPhone (and browsers without the pop-up): show how to do it
+}
+
+function showInstallSteps() {
+  const shareIcon = `<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" class="inline-icon"><path d="M12 3v12M7 8l5-5 5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><rect x="4" y="11" width="16" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="2"/></svg>`;
+  const steps = isIOS
+    ? [t("iosStep1", shareIcon), t("iosStep2"), t("iosStep3")]
+    : [t("androidStep1"), t("androidStep2"), t("androidStep3")];
+  const notSafari = isIOS && /CriOS|FxiOS|EdgiOS/i.test(navigator.userAgent);
+
+  const box = document.createElement("div");
+  box.className = "sheet-backdrop";
+  box.innerHTML = `
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="install-title">
+      <img src="assets/icon.svg" alt="" width="56" height="56">
+      <h2 id="install-title">${t("installTitle")}</h2>
+      ${notSafari ? `<p class="form-error" style="margin-top:12px">${t("iosOpenInSafari")}</p>` : ""}
+      <ol class="install-steps">${steps.map((s) => `<li>${s}</li>`).join("")}</ol>
+      <button class="btn btn-primary" id="install-close" style="width:100%">${t("gotIt")}</button>
+    </div>
+  `;
+  const close = () => box.remove();
+  box.onclick = (e) => e.target === box && close();
+  document.body.appendChild(box);
+  document.getElementById("install-close").onclick = close;
+  document.getElementById("install-close").focus();
+}
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("sw.js").catch((err) => console.error(err));
 }
 
 // ---------- Start ----------
