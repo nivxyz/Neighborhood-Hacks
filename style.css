@@ -618,6 +618,10 @@ input[type="file"]::file-selector-button {
   font-weight: 600;
 }
 .paste-box[open] summary { margin-bottom: 6px; }
+.ai-box .photo-pick { margin-top: 4px; }
+.ai-reading { animation: pulse-text 1.2s ease-in-out infinite; }
+.ai-check { margin: 4px 0 0; color: var(--progress); font-weight: 600; }
+@keyframes pulse-text { 50% { opacity: .45; } }
 .paste-box textarea { margin-top: 8px; font-family: ui-monospace, Consolas, monospace; font-size: 14px; }
 
 /* ---------- After registering ---------- */

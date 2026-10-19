@@ -124,6 +124,11 @@ export function parsePastedList(text) {
   }));
 }
 
+// A list that's already split into { name, flat } (from the AI reader)
+export function residentsFromList(list) {
+  return collect(list.map((r) => ({ flat: r.flat, names: r.name })));
+}
+
 // Shared by sheets and pasted lists: turns { flat, names } entries into a clean residents list
 function collect(entries) {
   const residents = [];

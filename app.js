@@ -3,11 +3,13 @@
 //   store.js   saves the data (Firebase, or this browser)
 //   roster.js  reads the admin's residents sheet and checks people against it
 //   photo.js   shrinks photos for complaints and announcements
+//   ai.js      reads a photo of a residents register with AI (only if the admin chooses it)
 //   i18n.js    all on-screen text, in English and Hindi
 
 import * as store from "./store.js";
 import { checkResident, readResidentsFile, parsePastedList, RESIDENT_FILE_TYPES, sampleSheetUrl, flatKey, nameKey } from "./roster.js";
 import { shrinkPhoto, isSafePhoto } from "./photo.js";
+import { aiReaderOn, readRegisterPhoto } from "./ai.js";
 import { t, has, getLang, setLang, LANGUAGES } from "./i18n.js";
 
 // ---------- Settings ----------
@@ -398,6 +400,7 @@ function showRegister() {
         <p class="hint">${t("residentsListHint")}
           <a href="${sampleSheetUrl()}" download="flatdesk-residents-sample.csv">${t("sampleSheet")}</a></p>
         ${pasteBox("r-paste")}
+        ${aiBox("r-ai")}
         <div id="sheet-result" aria-live="polite"></div>
       </div>
       <p class="form-error" id="register-error" hidden></p>
@@ -431,6 +434,17 @@ function showRegister() {
       result.innerHTML = `<p class="form-error">${esc(sheetError(err))}</p>`;
     }
   };
+
+  // AI: read a photo of the register into the same preview
+  bindAiBox("r-ai", (sheet) => {
+    residents = sheet.residents;
+    fileInput.value = "";
+    pasteInput.value = "";
+    result.innerHTML = sheetPreview(sheet, true);
+  }, (message) => {
+    residents = null;
+    result.innerHTML = message;
+  });
 
   // The preview updates as they paste or type
   pasteInput.oninput = () => {
@@ -511,19 +525,53 @@ function pasteBox(id) {
   `;
 }
 
-function sheetPreview({ residents, skipped }) {
+// "Handwritten list? Take a photo", read by AI. Only shown when the AI reader is set up.
+function aiBox(id) {
+  if (!aiReaderOn) return "";
+  return `
+    <details class="paste-box ai-box">
+      <summary>${t("aiReadButton")}</summary>
+      <p class="hint">${t("aiReadHint")}</p>
+      <label class="btn btn-small photo-pick">
+        <input type="file" id="${id}" accept="image/*" class="visually-hidden">
+        ${t("aiChoosePhoto")}
+      </label>
+    </details>
+  `;
+}
+
+// onRead gets { residents, skipped }; onStatus gets HTML to show while reading or on failure
+function bindAiBox(id, onRead, onStatus) {
+  const input = document.getElementById(id);
+  if (!input) return;
+  input.onchange = async () => {
+    const file = input.files[0];
+    if (!file) return;
+    onStatus(`<p class="hint ai-reading">${t("aiReading")}</p>`);
+    try {
+      onRead(await readRegisterPhoto(file));
+    } catch (err) {
+      console.error(err);
+      onStatus(`<p class="form-error">${t(has(err.message) ? err.message : "aiFailed")}</p>`);
+    }
+    input.value = "";
+  };
+}
+
+function sheetPreview({ residents, skipped }, fromAI = false) {
   const flats = new Set(residents.map((r) => flatKey(r.flat))).size;
   return `
     <div class="sheet-ok appear">
       <p><strong>${t("foundResidents", residents.length, flats)}</strong>
         ${skipped ? `<span class="muted">${t("skippedRows", skipped)}</span>` : ""}</p>
+      ${fromAI ? `<p class="hint ai-check">${t("aiCheckNote")}</p>` : ""}
       <table class="mini-table">
         <thead><tr><th>${t("name")}</th><th>${t("flat")}</th></tr></thead>
         <tbody>
-          ${residents.slice(0, 5).map((r) => `<tr><td>${esc(r.name)}</td><td>${esc(r.flat)}</td></tr>`).join("")}
+          ${residents.slice(0, fromAI ? residents.length : 5).map((r) => `<tr><td>${esc(r.name)}</td><td>${esc(r.flat)}</td></tr>`).join("")}
         </tbody>
       </table>
-      ${residents.length > 5 ? `<p class="hint">${t("andMore", residents.length - 5)}</p>` : ""}
+      ${!fromAI && residents.length > 5 ? `<p class="hint">${t("andMore", residents.length - 5)}</p>` : ""}
     </div>
   `;
 }
@@ -1173,6 +1221,8 @@ function showResidents(live = false) {
         <label for="add-file" class="hint" style="margin-top:14px;font-weight:500">${t("addFromSheet")}</label>
         <input id="add-file" type="file" accept="${RESIDENT_FILE_TYPES}">
         ${pasteBox("add-paste")}
+        ${aiBox("add-ai")}
+        <div id="ai-result" aria-live="polite"></div>
         <button type="button" class="btn btn-small" id="add-pasted" style="margin-top:8px">${t("addPasted")}</button>
       </form>
 
@@ -1250,6 +1300,16 @@ function showResidents(live = false) {
   // Keep the paste box open if it was open before a redraw
   const pasteArea = document.getElementById("add-paste");
   if (pasteArea.value) pasteArea.closest("details").open = true;
+
+  // AI: read a photo, show the list, and only add after the admin checks it
+  const aiResult = document.getElementById("ai-result");
+  bindAiBox("add-ai", (sheet) => {
+    aiResult.innerHTML = sheetPreview(sheet, true) + `<button type="button" class="btn btn-primary btn-small" id="ai-add" style="margin-top:8px">${t("aiAddThese", sheet.residents.length)}</button>`;
+    document.getElementById("ai-add").onclick = () => {
+      aiResult.innerHTML = "";
+      addMany(sheet.residents);
+    };
+  }, (message) => (aiResult.innerHTML = message));
 
   document.getElementById("add-pasted").onclick = () => {
     if (!pasteArea.value.trim()) return pasteArea.closest("details").open = true;
