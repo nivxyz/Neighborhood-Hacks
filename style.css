@@ -580,6 +580,7 @@ select {
   font-weight: 500;
 }
 .field .form-error { margin: 10px 0 0; }
+#file-result:not(:empty) { margin-top: 10px; }
 input[type="file"] { padding: 8px; cursor: pointer; }
 input[type="file"]::file-selector-button {
   margin-right: 12px;
@@ -618,7 +619,6 @@ input[type="file"]::file-selector-button {
   font-weight: 600;
 }
 .paste-box[open] summary { margin-bottom: 6px; }
-.ai-box .photo-pick { margin-top: 4px; }
 .ai-reading { animation: pulse-text 1.2s ease-in-out infinite; }
 .ai-check { margin: 4px 0 0; color: var(--progress); font-weight: 600; }
 @keyframes pulse-text { 50% { opacity: .45; } }

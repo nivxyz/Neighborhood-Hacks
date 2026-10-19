@@ -50,22 +50,35 @@ function loadSheetJS() {
   });
 }
 
-// File types the residents list can come from
+// Sheet and text files the residents list can come from (ai.js adds PDFs and photos)
 export const RESIDENT_FILE_TYPES = ".xlsx,.xls,.csv,.ods,.numbers,.txt";
 
-// Returns { residents: [{ name, flat }], skipped }.
-// Problems throw an Error whose message is a key app.js translates: "sheetEmpty", "needTwoCols", "noRows".
-export async function readResidentsFile(file) {
+// Opens a sheet or text file. Returns { rows, text }: rows for our own reader (null for .txt),
+// and the whole file as plain text lines, which is what gets sent to the AI to check.
+export async function readSheet(file) {
   const type = file.name.toLowerCase().split(".").pop();
-  if (type === "txt") return parsePastedList(await file.text()); // a plain list, like a pasted one
+  if (type === "txt") return { rows: null, text: await file.text() };
 
   await loadSheetJS();
   const book = type === "csv"
     ? XLSX.read(await file.text(), { type: "string" })
     : XLSX.read(await file.arrayBuffer());
   const sheet = book.Sheets[book.SheetNames[0]];
-  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false });
-  return parseRows(rows);
+  return {
+    rows: XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false }),
+    text: XLSX.utils.sheet_to_csv(sheet, { blankrows: false }),
+  };
+}
+
+// Our own (non-AI) reading of an opened sheet.
+// Returns { residents: [{ name, flat }], skipped }.
+// Problems throw an Error whose message is a key app.js translates: "sheetEmpty", "needTwoCols", "noRows".
+export function residentsFromSheet({ rows, text }) {
+  return rows ? parseRows(rows) : parsePastedList(text);
+}
+
+export async function readResidentsFile(file) {
+  return residentsFromSheet(await readSheet(file));
 }
 
 function parseRows(rows) {

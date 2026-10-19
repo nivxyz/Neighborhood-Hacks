@@ -1,6 +1,7 @@
-// FlatDesk AI reader: a Cloudflare Worker that reads a photo of a building's residents register.
-// FlatDesk sends the photo here, this asks Groq's vision AI for the names and flat numbers,
-// and sends back just the list. The Groq key stays here as a secret and never reaches a browser.
+// FlatDesk AI reader: a Cloudflare Worker that reads a building's residents list with Groq's AI.
+// FlatDesk sends either a photo ({ image }) or the text of a sheet or PDF ({ text }); this asks
+// Groq for the names and flat numbers, fixing mistakes, and sends back just the list.
+// The Groq key stays here as a secret and never reaches a browser.
 //
 // Settings (Cloudflare dashboard → your Worker → Settings → Variables and Secrets):
 //   GROQ_API_KEY    Secret. Your Groq API key.
@@ -10,17 +11,26 @@
 
 const DEFAULT_MODEL = "qwen/qwen3.8-27b";
 const MAX_IMAGE_CHARS = 3000000; // about a 2 MB photo; Groq refuses very large base64 images
+const MAX_TEXT_CHARS = 60000;    // a batch of rows from a sheet
 const MAX_RESIDENTS = 3000;
+
+const RULES = `Reply with JSON only, exactly in this shape: {"residents":[{"name":"...","flat":"..."}]}
+Rules:
+- One entry per person. If one line or cell lists several people for the same flat, make one entry for each.
+- Keep names spelled as written, but fix ALL CAPS or all lowercase into normal capitalisation.
+- Write flat numbers consistently, in the style most of the list uses, for example "B-304".
+- Skip headings, column titles, totals, phone numbers, dates, signatures, notes like "vacant" or "for rent", and anything that is not a resident.
+- Remove exact duplicates.
+- If there are no residents, reply {"residents":[]}.`;
+
+const TEXT_PROMPT = `This is an apartment building's residents list, copied from a spreadsheet, CSV or PDF.
+Columns may be in any order, have unusual titles, or be missing titles. Some cells may hold a flat and a name together, or two people.
+Find every resident's name and their flat or unit number, and fix mistakes.
+` + RULES;
 
 const PROMPT = `This is a photo of an apartment building's residents list. It may be a printed register, a notice, a spreadsheet on a screen, or a handwritten page.
 Read every resident's name and their flat or unit number.
-Reply with JSON only, exactly in this shape: {"residents":[{"name":"...","flat":"..."}]}
-Rules:
-- One entry per person. If one line lists several people for the same flat, make one entry for each.
-- Keep names spelled as written.
-- Write flat numbers the way they appear, for example "B-304" or "12".
-- Skip headings, totals, phone numbers, dates, signatures and anything that is not a resident.
-- If you cannot read any residents, reply {"residents":[]}.`;
+` + RULES;
 
 export default {
   async fetch(request, env) {
@@ -39,14 +49,27 @@ export default {
     if (request.method !== "POST" || !fromFlatDesk) return reply({ error: "notAllowed" }, 403, cors);
     if (!env.GROQ_API_KEY) return reply({ error: "notSetUp" }, 500, cors);
 
-    let image;
+    let body;
     try {
-      image = (await request.json()).image;
+      body = await request.json();
     } catch (err) {
       return reply({ error: "badRequest" }, 400, cors);
     }
-    if (typeof image !== "string" || !/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(image) || image.length > MAX_IMAGE_CHARS) {
-      return reply({ error: "badImage" }, 400, cors);
+
+    // Either the text of a sheet, or a photo
+    let content;
+    if (typeof body.text === "string") {
+      if (!body.text.trim() || body.text.length > MAX_TEXT_CHARS) return reply({ error: "badText" }, 400, cors);
+      content = [{ type: "text", text: TEXT_PROMPT + "\n\nThe list:\n" + body.text }];
+    } else {
+      const image = body.image;
+      if (typeof image !== "string" || !/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(image) || image.length > MAX_IMAGE_CHARS) {
+        return reply({ error: "badImage" }, 400, cors);
+      }
+      content = [
+        { type: "text", text: PROMPT },
+        { type: "image_url", image_url: { url: image } },
+      ];
     }
 
     const groq = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -55,14 +78,9 @@ export default {
       body: JSON.stringify({
         model: env.MODEL || DEFAULT_MODEL,
         temperature: 0,
+        max_completion_tokens: 8192,
         response_format: { type: "json_object" },
-        messages: [{
-          role: "user",
-          content: [
-            { type: "text", text: PROMPT },
-            { type: "image_url", image_url: { url: image } },
-          ],
-        }],
+        messages: [{ role: "user", content }],
       }),
     });
 
